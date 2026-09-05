@@ -1,60 +1,77 @@
 # Codex Handoff
 
 ## Task
-Implement Phase 1: Project Foundation for Version 0.1.
+Implement Phase 2: Research Layer for Version 0.1.
 
 ## Status
 Completed.
 
 ## Summary
-Created the approved `src`-layout package, packaging metadata, environment configuration, Pydantic foundation models, deterministic date and filename utilities, placeholder pipeline modules/prompts, offline tests, and setup documentation. The `data/raw/` and `reports/` directories were created. Research, LLM curation, and report generation remain unimplemented by design.
+Implemented the research-only stage for all six approved categories. It uses one
+sequential Responses API request per category, validates structured Pydantic
+output, retains only web-search-backed sources and in-range known dates, builds a
+`ResearchRun`, and atomically saves validated JSON. Curation, ranking, reporting,
+and the full pipeline remain unimplemented by design.
 
 ## Files Changed
-- `/home/shanl/ai-weekly-agent/.env.example`
-- `/home/shanl/ai-weekly-agent/.gitignore`
-- `/home/shanl/ai-weekly-agent/README.md`
-- `/home/shanl/ai-weekly-agent/pyproject.toml`
-- `/home/shanl/ai-weekly-agent/prompts/research.md`
-- `/home/shanl/ai-weekly-agent/prompts/curate.md`
-- `/home/shanl/ai-weekly-agent/prompts/report.md`
-- `/home/shanl/ai-weekly-agent/src/ai_weekly_agent/__init__.py`
-- `/home/shanl/ai-weekly-agent/src/ai_weekly_agent/main.py`
-- `/home/shanl/ai-weekly-agent/src/ai_weekly_agent/config.py`
-- `/home/shanl/ai-weekly-agent/src/ai_weekly_agent/models.py`
-- `/home/shanl/ai-weekly-agent/src/ai_weekly_agent/dates.py`
 - `/home/shanl/ai-weekly-agent/src/ai_weekly_agent/research.py`
-- `/home/shanl/ai-weekly-agent/src/ai_weekly_agent/curate.py`
-- `/home/shanl/ai-weekly-agent/src/ai_weekly_agent/report.py`
-- `/home/shanl/ai-weekly-agent/tests/test_config.py`
-- `/home/shanl/ai-weekly-agent/tests/test_models.py`
-- `/home/shanl/ai-weekly-agent/tests/test_dates.py`
+- `/home/shanl/ai-weekly-agent/prompts/research.md`
+- `/home/shanl/ai-weekly-agent/tests/test_research.py`
 - `/home/shanl/ai-weekly-agent/CODEX_HANDOFF.md`
 
 ## Important Decisions
-- `OPENAI_API_KEY` and `OPENAI_MODEL` remain optional while loading configuration; `AppConfig.require_openai_configuration()` performs explicit future API-operation validation.
-- Implemented `DateRange`, `Source`, `NewsItem`, `CategoryResearchResult`, `ResearchRun`, `CurationAssessment`, and `CuratedItem` as readable Pydantic models.
-- `CurationAssessment` uses a documented 1-to-5 scale and an optional `semantic_duplicate_of` candidate ID; no scoring logic was implemented.
-- `ReportDraft` was omitted because Phase 1 has no concrete structured report implementation.
-- The default reporting range ends on the supplied `today` date and starts six days earlier, representing seven inclusive calendar dates.
-- Raw filenames use `<start>_to_<end>.json`; weekly report filenames use the ISO week-year and week of the range end date, such as `2026-W36.md`.
-- `research.py`, `curate.py`, `report.py`, and their prompt files are explicit placeholders only.
+- The public API is `research_category(...)`, `research_all_categories(...)`, and
+  `save_research_run(...)`; `ResearchError` is the single stage-level exception.
+- Research calls use `client.responses.parse(...)` with the runtime
+  `OPENAI_MODEL`, `tools=[{"type": "web_search"}]`,
+  `include=["web_search_call.action.sources"]`, and
+  `text_format=CategoryResearchResult`. The client is injectable and is never
+  created at import time.
+- Structured Outputs are parsed directly into the existing
+  `CategoryResearchResult` Pydantic model and validated again at the project
+  boundary. Category mismatches and missing/invalid structured output fail
+  clearly.
+- Source provenance comes from `response.output` web-search calls. Search-action
+  `action.sources` URLs are the primary allow-list; explicit `action.url` values
+  from open/find activity are also accepted. Model-generated source URLs are
+  retained only when they match this activity after stripping whitespace,
+  lowercasing scheme/host, removing fragments, and normalizing trailing slashes.
+- Unsupported sources are removed. A candidate with no supported source is
+  removed without failing other candidates in the category.
+- Known `published_date` values outside the inclusive `DateRange` are removed;
+  null dates are retained and never inferred. Missing benchmark information
+  remains null.
+- All categories run sequentially in the frozen order and fail fast. Empty
+  categories are valid.
+- Raw data is only the validated `ResearchRun`, serialized as UTF-8 Pydantic JSON
+  to `data/raw/<start>_to_<end>.json`. A same-directory temporary file and
+  `os.replace` prevent a failed write from corrupting an existing file.
 
 ## Commands / Tests Run
+- `.venv/bin/python -m pytest tests/test_research.py`
 - `.venv/bin/python -m pytest`
-- `PYTHONPATH=src .venv/bin/python -c 'import ai_weekly_agent; print(ai_weekly_agent.__version__)'`
+- `PYTHONPATH=src .venv/bin/python -c 'import ai_weekly_agent.research as research; print(len(research.RESEARCH_CATEGORIES))'`
+- `git diff --check`
 - `git status --short`
 
 ## Test Results
-- 13 tests passed in 0.14 seconds.
-- The package import check succeeded and printed `0.1.0`.
-- No live OpenAI API or network calls were made.
+- 29 tests passed in the full offline suite; 16 are Phase 2 research tests.
+- The package research-module import check succeeded and printed `6` categories.
+- `git diff --check` passed.
+- No live OpenAI API request was made. Tests made no web requests; official
+  OpenAI documentation was consulted separately.
+
+## Deviations From Proposed Architecture
+None. The implementation uses the current SDK's Pydantic Responses parse helper
+and current web-search source metadata as requested.
 
 ## Known Issues
-- The research, curation, and report stages are not implemented yet, as required for Phase 1.
-- `main()` currently prints a clear not-implemented status message rather than running a pipeline.
+- Live compatibility depends on selecting an `OPENAI_MODEL` that supports the
+  Responses API, built-in web search, and Structured Outputs. This has not yet
+  been checked because live requests were explicitly out of scope.
 
 ## Open Questions
-- A concrete `OPENAI_MODEL` value must be supplied at runtime when API functionality is implemented; none is hardcoded.
+None blocking Phase 2.
 
 ## Recommended Next Step
-Implement Phase 2 research using the Responses API with `web_search`, structured `CategoryResearchResult` output, primary-source preference, and fully mocked tests. Do not implement curation or reporting in that phase unless separately requested.
+Phase 2.5: one controlled live smoke test for ONE category only.
