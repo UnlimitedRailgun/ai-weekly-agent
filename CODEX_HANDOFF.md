@@ -1,77 +1,84 @@
 # Codex Handoff
 
 ## Task
-Implement Phase 2: Research Layer for Version 0.1.
+Perform Phase 2.5: one controlled live research smoke test.
 
 ## Status
-Completed.
+Completed successfully.
 
 ## Summary
-Implemented the research-only stage for all six approved categories. It uses one
-sequential Responses API request per category, validates structured Pydantic
-output, retains only web-search-backed sources and in-range known dates, builds a
-`ResearchRun`, and atomically saves validated JSON. Curation, ranking, reporting,
-and the full pipeline remain unimplemented by design.
+Made exactly one live Responses API request by calling `research_category(...)`
+for `AI model releases` and the fixed inclusive range 2026-08-30 through
+2026-09-05. Automatic SDK retries were disabled. The structured response
+contained four items; all four remained after source/date validation. No raw
+research was persisted, and no application code was changed.
 
 ## Files Changed
-- `/home/shanl/ai-weekly-agent/src/ai_weekly_agent/research.py`
-- `/home/shanl/ai-weekly-agent/prompts/research.md`
-- `/home/shanl/ai-weekly-agent/tests/test_research.py`
 - `/home/shanl/ai-weekly-agent/CODEX_HANDOFF.md`
 
+No application files were changed. A temporary smoke-test script under `/tmp`
+and its bytecode were removed after use.
+
 ## Important Decisions
-- The public API is `research_category(...)`, `research_all_categories(...)`, and
-  `save_research_run(...)`; `ResearchError` is the single stage-level exception.
-- Research calls use `client.responses.parse(...)` with the runtime
-  `OPENAI_MODEL`, `tools=[{"type": "web_search"}]`,
-  `include=["web_search_call.action.sources"]`, and
-  `text_format=CategoryResearchResult`. The client is injectable and is never
-  created at import time.
-- Structured Outputs are parsed directly into the existing
-  `CategoryResearchResult` Pydantic model and validated again at the project
-  boundary. Category mismatches and missing/invalid structured output fail
-  clearly.
-- Source provenance comes from `response.output` web-search calls. Search-action
-  `action.sources` URLs are the primary allow-list; explicit `action.url` values
-  from open/find activity are also accepted. Model-generated source URLs are
-  retained only when they match this activity after stripping whitespace,
-  lowercasing scheme/host, removing fragments, and normalizing trailing slashes.
-- Unsupported sources are removed. A candidate with no supported source is
-  removed without failing other candidates in the category.
-- Known `published_date` values outside the inclusive `DateRange` are removed;
-  null dates are retained and never inferred. Missing benchmark information
-  remains null.
-- All categories run sequentially in the frozen order and fail fast. Empty
-  categories are valid.
-- Raw data is only the validated `ResearchRun`, serialized as UTF-8 Pydantic JSON
-  to `data/raw/<start>_to_<end>.json`. A same-directory temporary file and
-  `os.replace` prevent a failed write from corrupting an existing file.
+- Used the runtime model `gpt-5.6-terra`; no model override was applied.
+- Used the implemented signature
+  `research_category(date_range, category, config, *, client=None)` exactly once.
+- Injected an `OpenAI` client configured with `max_retries=0` to guarantee no
+  automatic retry. `research_all_categories(...)` and `save_research_run(...)`
+  were not called.
+- A temporary response-capturing wrapper observed pre-filter item count, source
+  metadata, and usage without making another request or changing production code.
 
 ## Commands / Tests Run
-- `.venv/bin/python -m pytest tests/test_research.py`
 - `.venv/bin/python -m pytest`
-- `PYTHONPATH=src .venv/bin/python -c 'import ai_weekly_agent.research as research; print(len(research.RESEARCH_CATEGORIES))'`
+- `git check-ignore -v .env`
+- `PYTHONPATH=src .venv/bin/python -c 'import inspect, sys; from ai_weekly_agent.config import load_config; from ai_weekly_agent.research import research_category; config = load_config(); missing = [name for name, value in (("OPENAI_API_KEY", config.openai_api_key), ("OPENAI_MODEL", config.openai_model)) if not value]; print("OPENAI_API_KEY: present" if config.openai_api_key else "OPENAI_API_KEY: missing"); print(f"OPENAI_MODEL: {config.openai_model}" if config.openai_model else "OPENAI_MODEL: missing"); print(f"research_category{inspect.signature(research_category)}"); sys.exit(1 if missing else 0)'`
+- `PYTHONPATH=src .venv/bin/python -m py_compile /tmp/ai_weekly_phase25_smoke.py`
+- `PYTHONPATH=src .venv/bin/python /tmp/ai_weekly_phase25_smoke.py`
 - `git diff --check`
 - `git status --short`
 
 ## Test Results
-- 29 tests passed in the full offline suite; 16 are Phase 2 research tests.
-- The package research-module import check succeeded and printed `6` categories.
-- `git diff --check` passed.
-- No live OpenAI API request was made. Tests made no web requests; official
-  OpenAI documentation was consulted separately.
-
-## Deviations From Proposed Architecture
-None. The implementation uses the current SDK's Pydantic Responses parse helper
-and current web-search source metadata as requested.
+- Offline suite: 29 tests passed in 1.05 seconds.
+- `.env` is ignored by the `.gitignore` rule on line 2.
+- `OPENAI_API_KEY` and `OPENAI_MODEL` were present; the key value was not printed.
+- Exactly one live Responses API request was made and succeeded in approximately
+  52.19 seconds.
+- Model: `gpt-5.6-terra`; category: `AI model releases`; range: 2026-08-30 through
+  2026-09-05.
+- Structured items: 4. Retained items: 4. Rejected items: 0.
+- The response contained 9 `web_search_call` items and source metadata. The
+  deterministic allow-list contained 107 normalized URLs, and every retained
+  source matched it.
+- Usage: 79,668 input tokens, 3,431 output tokens, 83,099 total tokens; output
+  included 1,482 reasoning tokens and input included 5,083 cache-write tokens.
+- No API, parsing, schema, or SDK compatibility error occurred.
 
 ## Known Issues
-- Live compatibility depends on selecting an `OPENAI_MODEL` that supports the
-  Responses API, built-in web search, and Structured Outputs. This has not yet
-  been checked because live requests were explicitly out of scope.
+- Source provenance proves that a URL appeared in web-search activity, not that
+  every claim is supported by that URL.
+- The Claude Fable/Mythos item retained a generic Anthropic newsroom URL while
+  labeling it as a specific announcement; its technical and benchmark claims
+  require manual verification against a direct primary page.
+- The Muse Spark item included a generic, tracked Meta Llama URL that may not
+  directly support the story. It also placed performance-style claims in
+  `technical_details` while leaving `benchmark_information` null.
+- Gemini and GPT-6 Astra used direct primary URLs, but their benchmark and other
+  provider-reported claims still require manual verification. No duplicate event
+  was apparent.
+- All four reported dates were syntactically inside the range, but this smoke test
+  did not make follow-up requests to confirm that page dates and underlying event
+  dates match.
+- One category consumed 83,099 tokens, which should be reviewed before running all
+  six categories.
 
 ## Open Questions
-None blocking Phase 2.
+- Should generic landing/newsroom URLs be rejected when a direct announcement URL
+  should exist?
+- Is the observed token usage acceptable for the eventual six-category run, or
+  should the research prompt/request be constrained first?
 
 ## Recommended Next Step
-Phase 2.5: one controlled live smoke test for ONE category only.
+Review the Phase 2.5 source-quality and token-usage findings before deciding
+whether to tighten the existing research prompt/validation. No compatibility fix
+is required, and Phase 3 should not start until that review is complete.
