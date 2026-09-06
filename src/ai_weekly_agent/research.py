@@ -30,6 +30,9 @@ RESEARCH_CATEGORIES = (
     "other important computer engineering developments",
 )
 
+# Total built-in tool calls allowed per category response.
+MAX_RESEARCH_TOOL_CALLS = 4
+
 _AUDIENCE = (
     "a university Computer Engineering student who is relatively new to "
     "the AI industry"
@@ -62,6 +65,7 @@ def research_category(
         response = api_client.responses.parse(
             model=model,
             tools=[{"type": "web_search"}],
+            max_tool_calls=MAX_RESEARCH_TOOL_CALLS,
             include=["web_search_call.action.sources"],
             input=prompt,
             text_format=CategoryResearchResult,

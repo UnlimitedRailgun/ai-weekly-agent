@@ -113,6 +113,14 @@ def single_result(*items: dict[str, Any]) -> dict[str, Any]:
     return {"category": CATEGORY, "items": list(items)}
 
 
+@pytest.fixture
+def research_prompt() -> str:
+    """Capture the rendered prompt at the fake API boundary."""
+    client = client_for(single_result())
+    research_category(DATE_RANGE, CATEGORY, configured_app(), client=client)
+    return " ".join(client.responses.calls[0]["input"].split())
+
+
 def test_research_uses_configured_model() -> None:
     client = client_for(single_result())
 
@@ -131,6 +139,15 @@ def test_research_enables_web_search_and_source_metadata() -> None:
     assert call["include"] == ["web_search_call.action.sources"]
 
 
+def test_research_limits_built_in_tool_calls_to_four() -> None:
+    client = client_for(single_result())
+
+    research_category(DATE_RANGE, CATEGORY, configured_app(), client=client)
+
+    assert len(client.responses.calls) == 1
+    assert client.responses.calls[0]["max_tool_calls"] == 4
+
+
 def test_research_prompt_contains_category_and_date_range() -> None:
     client = client_for(single_result())
 
@@ -139,6 +156,50 @@ def test_research_prompt_contains_category_and_date_range() -> None:
     prompt = client.responses.calls[0]["input"]
     assert f"Research category: {CATEGORY}" in prompt
     assert "2026-08-30 through 2026-09-05" in prompt
+
+
+def test_research_prompt_requests_direct_primary_sources(
+    research_prompt: str,
+) -> None:
+    assert "prefer a direct canonical primary-source page" in research_prompt
+    assert "direct official company or organization announcement" in research_prompt
+    assert "direct documentation or release page" in research_prompt
+    assert "When a specific page exists, avoid using" in research_prompt
+    assert "generic newsroom index" in research_prompt
+    assert "URL-shortener/tracking URL as the main source" in research_prompt
+    assert "must not replace a primary source when one exists" in research_prompt
+
+
+def test_research_prompt_bounds_discovery_depth(research_prompt: str) -> None:
+    assert "not an exhaustive deep-research task" in research_prompt
+    assert "Avoid exhaustive searching" in research_prompt
+    assert "Stop researching when you have enough evidence" in research_prompt
+    assert "approximately 0-5 strong candidate stories" in research_prompt
+    assert "Prioritize quality over coverage" in research_prompt
+
+
+def test_research_prompt_allows_zero_results(research_prompt: str) -> None:
+    assert "Return zero items when nothing important occurred" in research_prompt
+    assert "do not force a minimum or exactly five items" in research_prompt
+
+
+def test_research_prompt_separates_performance_claims(
+    research_prompt: str,
+) -> None:
+    assert (
+        "Use `technical_details` for source-supported architecture"
+    ) in research_prompt
+    assert (
+        "Put all quantitative performance claims in `benchmark_information`, "
+        "not in `technical_details`"
+    ) in research_prompt
+    assert "measured latency, measured throughput" in research_prompt
+    assert "fewer tool calls or tokens for the same workload" in research_prompt
+    assert (
+        "If reliable benchmark/performance evidence is unavailable, set "
+        "`benchmark_information` to null and omit those claims"
+    ) in research_prompt
+    assert "Never invent or infer benchmark numbers" in research_prompt
 
 
 def test_structured_output_becomes_category_result() -> None:
@@ -217,6 +278,20 @@ def test_out_of_range_candidate_is_rejected() -> None:
     )
 
     assert result.items == []
+
+
+def test_unknown_date_is_retained_without_inference() -> None:
+    client = client_for(single_result(candidate(published_date=None)))
+
+    result = research_category(
+        DATE_RANGE,
+        CATEGORY,
+        configured_app(),
+        client=client,
+    )
+
+    assert len(result.items) == 1
+    assert result.items[0].published_date is None
 
 
 def test_missing_benchmark_information_is_accepted() -> None:
