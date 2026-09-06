@@ -243,11 +243,15 @@ def _supported_sources(
 
 
 def _web_search_urls(response: object) -> set[str]:
+    """Return normalized source URLs from completed web-search calls only."""
     urls: set[str] = set()
     output = _value(response, "output") or []
 
     for output_item in output:
-        if _value(output_item, "type") != "web_search_call":
+        if (
+            _value(output_item, "type") != "web_search_call"
+            or _value(output_item, "status") != "completed"
+        ):
             continue
 
         action = _value(output_item, "action")

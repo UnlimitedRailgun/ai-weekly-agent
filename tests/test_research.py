@@ -1,6 +1,7 @@
 import json
 from datetime import date
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -67,6 +68,7 @@ def response_for(
         "output": [
             {
                 "type": "web_search_call",
+                "status": "completed",
                 "action": {
                     "type": "search",
                     "sources": [
@@ -178,6 +180,40 @@ def test_research_prompt_bounds_discovery_depth(research_prompt: str) -> None:
     assert "Prioritize quality over coverage" in research_prompt
 
 
+def test_research_prompt_requests_release_time_evidence(
+    research_prompt: str,
+) -> None:
+    assert "prefer dated/version-specific evidence" in research_prompt
+    assert "capabilities available at launch" in research_prompt
+    assert "benchmark results announced at launch" in research_prompt
+    for evidence_type in (
+        "direct launch announcement",
+        "dated release notes",
+        "versioned documentation",
+        "dated model card",
+        "paper/arXiv version",
+        "dated GitHub release",
+        "dated university/lab publication",
+    ):
+        assert evidence_type in research_prompt
+
+
+def test_research_prompt_limits_mutable_pages_to_current_context(
+    research_prompt: str,
+) -> None:
+    assert (
+        "A mutable generic product page may be used for current background context"
+    ) in research_prompt
+    assert (
+        "must not be the sole evidence for a historical launch-time claim "
+        "when dated release evidence should exist"
+    ) in research_prompt
+    assert (
+        "Do not treat a later page update or current availability as proof "
+        "of what was available at launch"
+    ) in research_prompt
+
+
 def test_research_prompt_allows_zero_results(research_prompt: str) -> None:
     assert "Return zero items when nothing important occurred" in research_prompt
     assert "do not force a minimum or exactly five items" in research_prompt
@@ -232,6 +268,82 @@ def test_valid_web_search_source_remains_and_is_normalized() -> None:
     )
 
     assert result.items[0].sources[0].url == VALID_URL
+
+
+@pytest.mark.parametrize("as_attributes", [False, True], ids=["dict", "object"])
+@pytest.mark.parametrize("action_type", ["search", "open_page", "find_in_page"])
+@pytest.mark.parametrize(
+    ("status", "expected_urls"),
+    [
+        ("completed", [VALID_URL]),
+        ("searching", []),
+        ("in_progress", []),
+        ("failed", []),
+        pytest.param(None, [], id="missing-status"),
+    ],
+)
+def test_only_completed_tool_calls_support_item_sources(
+    as_attributes: bool,
+    action_type: str,
+    status: str | None,
+    expected_urls: list[str],
+) -> None:
+    action: dict[str, Any] = {"type": action_type}
+    if action_type == "search":
+        source = {"type": "url", "url": VALID_URL}
+        action["sources"] = [
+            SimpleNamespace(**source) if as_attributes else source
+        ]
+    else:
+        action["url"] = VALID_URL
+        if action_type == "find_in_page":
+            action["pattern"] = "release"
+
+    call: dict[str, Any] = {
+        "type": "web_search_call",
+        "action": SimpleNamespace(**action) if as_attributes else action,
+    }
+    if status is not None:
+        call["status"] = status
+    response = response_for(single_result(candidate()))
+    response["output"] = [SimpleNamespace(**call) if as_attributes else call]
+    client = FakeClient(FakeResponses(response))
+
+    result = research_category(
+        DATE_RANGE, CATEGORY, configured_app(), client=client
+    )
+
+    assert [
+        source.url for item in result.items for source in item.sources
+    ] == expected_urls
+    assert len(result.items) == (1 if expected_urls else 0)
+
+
+def test_unfinished_sources_are_removed_without_affecting_valid_stories() -> None:
+    unfinished_url = "https://example.com/unconfirmed-release"
+    valid = candidate(title="Completed-source story")
+    mixed = candidate(
+        title="Mixed-source story", source_urls=(VALID_URL, unfinished_url)
+    )
+    unfinished = candidate(
+        title="Unfinished-source story", source_urls=(unfinished_url,)
+    )
+    response = response_for(single_result(valid, mixed, unfinished))
+    response["output"].append({
+        "type": "web_search_call",
+        "status": "searching",
+        "action": {"type": "open_page", "url": unfinished_url},
+    })
+    client = FakeClient(FakeResponses(response))
+
+    result = research_category(
+        DATE_RANGE, CATEGORY, configured_app(), client=client
+    )
+
+    assert [item.title for item in result.items] == [valid["title"], mixed["title"]]
+    assert [
+        [source.url for source in item.sources] for item in result.items
+    ] == [[VALID_URL], [VALID_URL]]
 
 
 def test_unsupported_source_url_is_removed() -> None:

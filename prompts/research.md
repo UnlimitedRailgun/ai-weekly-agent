@@ -38,6 +38,19 @@ URL instead. Use reputable secondary reporting only when it supplies necessary
 context or no suitable primary source is available; it must not replace a
 primary source when one exists. Do not treat a search-result snippet as evidence.
 
+For time-sensitive claims about announcement dates, release dates, initial
+availability, capabilities available at launch, benchmark results announced at
+launch, or version-specific behavior, prefer dated/version-specific evidence:
+a direct launch announcement, dated release notes, versioned documentation,
+a dated model card, a paper/arXiv version, a dated GitHub release, or a dated
+university/lab publication. Check that the evidence supports the claimed version
+and availability at the time of the event in the reporting window.
+
+A mutable generic product page may be used for current background context, but
+must not be the sole evidence for a historical launch-time claim when dated
+release evidence should exist. Do not treat a later page update or current
+availability as proof of what was available at launch.
+
 For each item:
 
 - State what happened, what it is, who created it, and why it may matter.
