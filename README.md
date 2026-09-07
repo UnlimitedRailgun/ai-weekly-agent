@@ -4,7 +4,7 @@ This project will produce a beginner-friendly weekly overview of important AI an
 
 `Research -> Curate -> Report / Explain -> Save locally`
 
-The project foundation currently provides configuration loading, Pydantic data models, deterministic date utilities, package metadata, and offline tests. Research, LLM curation, and report generation are placeholders and are not implemented yet.
+The Research, Curator, and Report / Explain stages are implemented and covered by offline tests. The full end-to-end CLI pipeline is not implemented yet; the stages are not yet connected through `main.py`.
 
 ## Architecture
 
@@ -29,7 +29,7 @@ Install the package and development dependencies:
 python -m pip install -e ".[dev]"
 ```
 
-Copy `.env.example` to `.env` when local API configuration is eventually needed, then set `OPENAI_API_KEY` and `OPENAI_MODEL`. Neither value is required for the current foundation tests.
+Copy `.env.example` to `.env` for live research, curation, or report explanation generation, then set `OPENAI_API_KEY` and `OPENAI_MODEL`. Tests mock all network boundaries and do not require either value.
 
 Run the tests:
 
@@ -43,4 +43,4 @@ The planned eventual run command is:
 python -m ai_weekly_agent.main
 ```
 
-At present, that command only reports that the research pipeline has not been implemented.
+At present, that command remains a placeholder and does not run the implemented stages end to end.
