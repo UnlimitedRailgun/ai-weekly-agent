@@ -1,6 +1,6 @@
 # AI & Computer Engineering Weekly Research Agent
 
-This project will produce a beginner-friendly weekly overview of important AI and Computer Engineering developments for university students. Version 0.1 is intentionally small and will use a linear workflow:
+This project produces a beginner-friendly weekly overview of important AI and Computer Engineering developments for university students. Version 0.1 is intentionally small and uses a linear workflow:
 
 `Research -> Curate -> Report / Explain -> Save locally`
 
@@ -9,6 +9,15 @@ The Research, Curator, and Report / Explain stages are connected by a small sync
 ## Architecture
 
 Production code lives in `src/ai_weekly_agent/`. The `research.py`, `curate.py`, and `report.py` modules correspond to the three planned workflow stages. Reusable prompts live in `prompts/`, raw research will be stored in `data/raw/`, and final Markdown reports will be stored in `reports/`.
+
+Each run researches these six categories:
+
+- AI model releases
+- AI developer tools and frameworks
+- Important AI research
+- GPUs, semiconductors, and AI infrastructure
+- Robotics and physical AI
+- Other important computer engineering developments
 
 Version 0.1 will not include a database, RAG, a vector database, a web UI, a scheduler, Docker, delivery integrations, or a multi-agent framework.
 
