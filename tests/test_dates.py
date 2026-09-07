@@ -4,6 +4,7 @@ import pytest
 from pydantic import ValidationError
 
 from ai_weekly_agent.dates import (
+    get_date_range_for_days,
     get_default_date_range,
     get_explicit_date_range,
     raw_research_filename,
@@ -16,6 +17,30 @@ def test_default_range_contains_seven_inclusive_calendar_dates() -> None:
 
     assert date_range.start == date(2026, 8, 30)
     assert date_range.end == date(2026, 9, 5)
+
+
+@pytest.mark.parametrize(
+    ("days", "expected_start"),
+    [
+        (7, date(2026, 9, 1)),
+        (3, date(2026, 9, 5)),
+        (1, date(2026, 9, 7)),
+    ],
+)
+def test_relative_range_contains_requested_inclusive_calendar_dates(
+    days: int,
+    expected_start: date,
+) -> None:
+    date_range = get_date_range_for_days(days, today=date(2026, 9, 7))
+
+    assert date_range.start == expected_start
+    assert date_range.end == date(2026, 9, 7)
+
+
+@pytest.mark.parametrize("days", [0, -1])
+def test_relative_range_requires_positive_days(days: int) -> None:
+    with pytest.raises(ValueError, match="days must be a positive integer"):
+        get_date_range_for_days(days, today=date(2026, 9, 7))
 
 
 def test_explicit_date_range() -> None:

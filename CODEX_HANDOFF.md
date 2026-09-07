@@ -2,113 +2,103 @@
 
 ## Task
 
-Perform Phase 4.5: controlled live Report smoke test.
+Implement Phase 5: Minimal End-to-End CLI Integration for Version 0.1.
 
 ## Status
 
-Completed successfully. Exactly one live Responses API request was made. The
-Version 0.1 Report stage is ready to freeze.
+Completed. The offline CLI integration passes the full test suite. No frozen
+Research, Curator, Report, or production prompt file was changed.
 
 ## Summary
 
-Ran `generate_report()` once with four synthetic CuratedItems covering model,
-accelerator, robotics, and developer-tool stories. The actual Structured Output
-mapped correctly, rendered deterministically, preserved benchmark caveats,
-applied the fixed null-benchmark message, and used only fixture source URLs. No
-synthetic report was persisted.
+Replaced the placeholder entry point with a synchronous CLI that selects a date
+range, validates configuration, runs the frozen stages in order, preserves raw
+research before later model work, and safely saves the final report. Added
+argument validation, concise progress/errors, overwrite protection, packaging
+entry points, README usage, and offline orchestration tests.
 
 ## Files Changed
 
+- `/home/shanl/ai-weekly-agent/src/ai_weekly_agent/main.py`
+- `/home/shanl/ai-weekly-agent/src/ai_weekly_agent/dates.py`
+- `/home/shanl/ai-weekly-agent/tests/test_main.py`
+- `/home/shanl/ai-weekly-agent/tests/test_dates.py`
+- `/home/shanl/ai-weekly-agent/pyproject.toml`
+- `/home/shanl/ai-weekly-agent/README.md`
 - `/home/shanl/ai-weekly-agent/CODEX_HANDOFF.md`
 
-No application code, prompt, model, test, threshold, or production output file
-was changed.
+The editable installation also updated the ignored local `.venv/` and generated
+ignored package metadata under `src/ai_weekly_agent.egg-info/`.
 
 ## Important Decisions
 
-- Used the runtime `OPENAI_MODEL` value `gpt-5.6-terra` with an injected OpenAI
-  client configured as `max_retries=0`.
-- Sent four synthetic stories with stable IDs `story_001` through `story_004`.
-  The response returned four explanations in exact one-to-one ID coverage, with
-  no unknown, duplicate, or missing IDs.
-- The request contained no `tools` or `tool_choice`; the response contained only
-  a `message`, with zero `web_search` and zero other tool calls.
-- The model prompt contained zero fixture source URLs. Structured prose contained
-  no URL-like text. Every Markdown link matched an input `NewsItem.sources` URL.
-  Existing offline tests remain the evidence that URL-like model prose fails
-  closed with `ReportError`.
-- Six source entries were rendered with their stories. The consolidated Source
-  Index contained five unique normalized URLs, correctly deduplicating the shared
-  secondary URL.
-- The model returned four concise summary bullets. They accurately synthesized
-  the model, chiplet, tactile-robotics, and GPU-debugging stories without adding
-  unsupported event claims.
-- The model returned five grounded concepts: sparse mixture-of-experts routing;
-  inference throughput and deployment conditions; chiplets/coherence/shared
-  memory; closed-loop tactile robot control; and deterministic replay for
-  concurrency debugging. All related IDs referenced supplied stories.
-- Each story included a clear event description, beginner-friendly definition,
-  concrete technical significance, relevant engineering explanation, and a
-  practical student learning direction. The prose avoided hype and generally
-  marked unspecified implementation details explicitly.
-- The Helios-4 benchmark explanation repeated only supplied quantities: 72
-  tokens/s, one Example X900 accelerator, batch size 1, and 8-bit weights. It
-  preserved that the result was company-reported, unverified, and lacked a
-  comparison baseline. One minor wording inference called the supplied inference
-  API “hosted”; this did not affect metadata, citations, or benchmark accuracy and
-  does not justify a prompt/code change from one synthetic sample.
-- The three stories with null benchmark data each rendered exactly: “No reliable
-  benchmark information was available in the researched sources.” No model
-  benchmark claim appeared in those rendered sections.
-- Story order, titles, categories, organizations, dates, and curation scores all
-  matched the CuratedItem input. These values came from deterministic Python, not
-  model output.
-- No production changes are recommended. The Report stage is ready to freeze for
-  Version 0.1.
+- CLI entry points are `ai-weekly` and
+  `python -m ai_weekly_agent.main`; the existing `ai-weekly-agent` alias remains
+  available.
+- Supported arguments are `--start YYYY-MM-DD --end YYYY-MM-DD`, `--days N`,
+  and `--overwrite`. Explicit endpoints must be paired, `--days` must be
+  positive, and relative and explicit modes cannot be combined.
+- The default is seven inclusive local calendar dates: end is `date.today()` and
+  start is six days earlier. `--days N` uses the same inclusive semantics.
+- The exact call order is: determine date range, check the intended report path,
+  load/validate configuration, `research_all_categories()`,
+  `save_research_run()`, `curate_research_run()`, `generate_report()`, then
+  `save_report()`.
+- Raw JSON is atomically saved before curation. Later failure leaves that raw
+  artifact intact and does not create a partial Markdown report. No stage is
+  retried by the CLI.
+- Existing final reports stop execution before configuration or research unless
+  `--overwrite` is present. `save_report()` remains the final overwrite-safety
+  authority.
+- Console output contains the reporting period, four progress steps, candidate
+  and curated counts, and final paths. Expected errors are concise; unexpected
+  programming errors still propagate for debugging.
+- Empty research and curation results remain valid and flow through the existing
+  deterministic empty-report behavior.
 
 ## Commands / Tests Run
 
-- `.venv/bin/python -m pytest`
-- `git check-ignore -v .env`
-- `PYTHONPATH=src .venv/bin/python -c "from ai_weekly_agent.config import load_config; c=load_config(); print('OPENAI_API_KEY present:', bool(c.openai_api_key)); print('OPENAI_MODEL present:', bool(c.openai_model)); print('OPENAI_MODEL:', c.openai_model if c.openai_model else '<missing>')"`
-- `rg -n "responses\\.parse|tools|tool_choice|web_search" src/ai_weekly_agent/report.py prompts/report.md`
-- `.venv/bin/python -m py_compile /tmp/ai_weekly_phase45_smoke.py`
-- `rg -n "generate_report\\(|render_markdown\\(|research_category\\(|research_all_categories\\(|curate_research_run\\(|responses\\.parse|tools|tool_choice|web_search" /tmp/ai_weekly_phase45_smoke.py`
-- `PYTHONPATH=src .venv/bin/python /tmp/ai_weekly_phase45_smoke.py`
-- `find /tmp -maxdepth 2 -type f -name 'ai_weekly_phase45_smoke*' -print 2>/dev/null`
-- `rm -f /tmp/__pycache__/ai_weekly_phase45_smoke.cpython-312.pyc`
+- `.venv/bin/python -m pytest` (baseline)
+- `.venv/bin/python -m pytest tests/test_dates.py tests/test_main.py`
+- `.venv/bin/python -m pytest` (full Phase 5 suite)
+- `.venv/bin/python -m pip install -e .`
+- `.venv/bin/python -c "import setuptools; print(setuptools.__version__)"`
+- `PYTHONPATH=/usr/lib/python3/dist-packages .venv/bin/python -m pip install -e . --no-build-isolation --no-deps`
+- `PYTHONPATH=/usr/lib/python3/dist-packages .venv/bin/python -c "from setuptools import setup; setup()" develop`
+- `.venv/bin/python -c "import ai_weekly_agent; import ai_weekly_agent.main; print('package import: ok')"`
+- `.venv/bin/ai-weekly --help`
+- `.venv/bin/python -m ai_weekly_agent.main --help`
 - `git diff --check`
 - `git status --short`
 
 ## Test Results
 
-- Offline suite: 146 tests passed in 1.09 seconds.
-- Live Responses API requests: exactly 1; no retry or follow-up request.
-- Model: `gpt-5.6-terra`.
-- Elapsed time: approximately 29.378 seconds.
-- Usage: 1,575 input tokens; 2,183 output tokens; 0 reasoning tokens; 3,758
-  total tokens.
-- Structured result: 4/4 expected story explanations, 4 summary bullets, and 5
-  concepts with valid related-story IDs.
-- URL result: zero prompt source URLs, zero model-prose URLs, all final links
-  trusted, and 5/5 Source Index URLs unique after normalization.
-- Zero `web_search` calls and zero tool calls occurred. No commit was created.
-- The current official OpenAI Structured Outputs documentation was consulted
-  separately; this was not an application Responses API or project web-search
-  call.
+- Baseline before Phase 5: 146 tests passed.
+- Focused CLI/date suite: 34 tests passed.
+- Full suite after implementation: 179 tests passed in 0.97 seconds.
+- Final post-install suite: 179 tests passed in 1.29 seconds.
+- CLI tests mock every stage boundary and make zero OpenAI, Responses API,
+  web-search, or other application network calls.
+- Package import succeeded without `PYTHONPATH=src` after the offline editable
+  fallback. Both console-script and module help paths exited successfully.
+- Zero live OpenAI API requests and zero project web-search requests occurred.
+  The first standard editable-install attempt did make unsuccessful PyPI
+  connection attempts while trying to obtain isolated build dependencies; no
+  package data was downloaded. The later editable fallback was fully local.
 
 ## Known Issues
 
-No runtime, SDK, schema, rendering, benchmark, or citation-safety issue was
-observed. One phrase (“hosted inference API”) was slightly more specific than the
-fixture’s “inference API”; monitor this in real reports, but do not tune from one
-synthetic example.
+- This environment's virtual environment lacks local `setuptools` and `wheel`,
+  while network access is unavailable. Standard PEP 517 editable installation
+  therefore failed. A deprecated but successful local setuptools `develop`
+  fallback installed the entry points. In a normally provisioned environment,
+  `python -m pip install -e ".[dev]"` remains the documented command.
 
 ## Open Questions
 
-None blocking the Report-stage freeze.
+None blocking Phase 5.5.
 
 ## Recommended Next Step
 
-Freeze the Version 0.1 Report stage and implement the minimal end-to-end CLI
-pipeline.
+Phase 5.5: controlled first full end-to-end Version 0.1 run using a fixed
+seven-day DateRange.

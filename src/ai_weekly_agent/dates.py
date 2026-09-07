@@ -7,8 +7,19 @@ from ai_weekly_agent.models import DateRange
 
 def get_default_date_range(today: date | None = None) -> DateRange:
     """Return seven inclusive calendar dates ending on ``today``."""
+    return get_date_range_for_days(7, today=today)
+
+
+def get_date_range_for_days(
+    days: int,
+    today: date | None = None,
+) -> DateRange:
+    """Return ``days`` inclusive calendar dates ending on ``today``."""
+    if days <= 0:
+        raise ValueError("days must be a positive integer")
+
     end = today if today is not None else date.today()
-    return DateRange(start=end - timedelta(days=6), end=end)
+    return DateRange(start=end - timedelta(days=days - 1), end=end)
 
 
 def get_explicit_date_range(start: date, end: date) -> DateRange:

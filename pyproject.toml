@@ -20,6 +20,7 @@ dev = [
 ]
 
 [project.scripts]
+ai-weekly = "ai_weekly_agent.main:main"
 ai-weekly-agent = "ai_weekly_agent.main:main"
 
 [tool.setuptools.packages.find]
