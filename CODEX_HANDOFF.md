@@ -1,102 +1,152 @@
-# Codex Handoff — AI Weekly Agent v0.2 Phase 4.1
+# Codex Handoff — AI Weekly Agent v0.2 Phase 4.2
 
 ## Task
 
-Implement v0.2 Phase 4.1: additive source evidence-role metadata,
-deterministic evidence verification, and offline tests. Do not integrate Verify
-into the CLI or implement later v0.2 work.
+Perform one controlled live Research/Verify compatibility smoke test for the
+v0.2 evidence-role schema and deterministic verifier.
 
 ## Status
 
-Completed.
+Passed.
 
 ## Summary
 
-Added backward-compatible evidence roles to `Source`, updated the Research
-prompt to classify what each source supports, and added a standalone,
-deterministic verifier. Verify returns a separate accepted `ResearchRun` with
-typed findings and rejected item IDs; it never mutates the original run and
-makes no API or network calls.
+Exactly one live `AI model releases` Research category operation completed
+successfully. Structured output populated every retained source with meaningful,
+non-empty evidence roles. An in-memory complete `ResearchRun`, using five empty
+synthetic category results as structural scaffolding, was consumed by Verify
+without production changes. All three live items were accepted, and verification
+did not mutate the live Research result.
+
+## Live Configuration
+
+- Category: `AI model releases`
+- Inclusive date range: `2026-08-30` through `2026-09-05`
+- Runtime model: `gpt-5.6-terra`
+- Installed OpenAI SDK: `3.8.0`
+- Retry behavior: Research constructed its normal client, so the SDK default
+  `max_retries=2` was in effect. No manual/application retry was made. The
+  number of underlying HTTP attempts is not observable through the current
+  Research return value.
+- Persistence: disabled. No raw Research JSON or weekly report was saved.
+- Approximate elapsed time: 43.87 seconds.
+
+## Research Result
+
+- Researched items: 3
+- Usable retained sources: 7
+- Sources with `evidence_roles=None`: 0
+- Sources with empty evidence roles: 0
+- Sources with one or more roles: 7
+- Sources with duplicate roles: 0
+- Role occurrences:
+  - `event`: 5
+  - `event_date`: 5
+  - `technical`: 7
+  - `benchmark`: 3
+  - `background`: 0
+
+Item coverage:
+
+- `category_01:item_001` — “Anthropic releases Claude Fable 5.1 and Claude
+  Mythos 5.1”; date `2026-09-01`; 2 sources; roles `event`, `event_date`,
+  `technical`; all required event/date/technical coverage present; no benchmark
+  claim.
+- `category_01:item_002` — “Google introduces Gemini 3.8 Flash and Gemini 3.8
+  Flash Cyber”; date `2026-09-02`; 3 sources; roles `event`, `event_date`,
+  `technical`, `benchmark`; all required coverage present.
+- `category_01:item_003` — “OpenAI releases GPT-6 Astra to a limited initial
+  set of organizations”; date `2026-09-03`; 2 sources; roles `event`,
+  `event_date`, `technical`, `benchmark`; all required coverage present.
+
+These are Research-produced classifications. This smoke test did not
+independently verify the claims or source-page contents. The first item used
+sources labelled as mutable product pages for event/date evidence, which remains
+a manual evidence-quality consideration even though its structure passed.
+
+## Verification Result
+
+- Live items accepted: 3
+- Live items rejected: 0
+- Warning findings: 0
+- Information findings: 0
+- Finding codes: none
+- Rejected item IDs/reasons: none
+- Synthetic scaffolding: five empty canonical category results, in memory only
+- Synthetic findings: 0
+- Original live input unchanged:
+  `live_input_before == live_input_after` was `True`
+
+## Compatibility Conclusion
+
+- Structured output parsed: yes.
+- New Sources populated evidence roles: yes, 7 of 7.
+- Null role values: none.
+- Empty role lists: none.
+- Invalid or duplicate roles: none.
+- Verifier consumed the result: yes.
+- Original live input remained unchanged: yes.
+- Phase 4.1 production change necessary: no.
+
+This is a schema/verifier compatibility pass. No item was rejected for
+evidence-quality coverage, and backward compatibility did not conceal missing
+roles.
+
+## API / Network Activity
+
+- One logical live `research_category()` invocation was made.
+- That invocation made one logical `responses.parse()` request and allowed the
+  existing built-in `web_search` tool behavior. The current implementation
+  does not expose the number of underlying SDK HTTP attempts or completed
+  built-in search calls from its returned category result, so those counts are
+  not estimated.
+- No other Research categories, Curator, Report, or Main calls were made.
+- No follow-up searches were made to investigate the returned stories.
+- Before the smoke test, one official OpenAI documentation search and one page
+  fetch confirmed the current Responses API parameters. These were documentation
+  lookups, not model/category Research calls.
 
 ## Files Changed
 
-- `/home/shanl/ai-weekly-agent/src/ai_weekly_agent/models.py`
-- `/home/shanl/ai-weekly-agent/src/ai_weekly_agent/research.py`
-- `/home/shanl/ai-weekly-agent/src/ai_weekly_agent/verify.py` (new)
-- `/home/shanl/ai-weekly-agent/prompts/research.md`
-- `/home/shanl/ai-weekly-agent/tests/test_models.py`
-- `/home/shanl/ai-weekly-agent/tests/test_research.py`
-- `/home/shanl/ai-weekly-agent/tests/test_verify.py` (new)
 - `/home/shanl/ai-weekly-agent/CODEX_HANDOFF.md`
 
-No CLI, telemetry, reliability configuration, report, Curator, generated data,
-or version file was changed.
-
-## Important Decisions
-
-- `Source.evidence_roles` is nullable for v0.1 compatibility and accepts only
-  `event`, `event_date`, `technical`, `benchmark`, and `background`. Duplicate
-  roles are rejected consistently by Pydantic validation.
-- Research now asks for roles that describe what each specific source supports;
-  these are model-reported classifications, not independent fact checking.
-- Item IDs use one-based input positions in the exact format
-  `category_NN:item_NNN`, for example `category_01:item_002`.
-- A malformed run raises `VerificationError`. Missing, duplicated, and
-  unsupported canonical category results are run-level failures.
-- Item hard failures are: no usable HTTP(S) source, category mismatch, known
-  event date outside the inclusive window, no `event` evidence for fully
-  role-aware data, known date without `event_date` evidence for fully
-  role-aware data, and non-empty `benchmark_information` without `benchmark`
-  evidence for fully role-aware data.
-- Warnings are: an unusable source removed, legacy/mixed missing role metadata,
-  unknown event date, all usable sources explicitly typed `secondary`, and
-  non-empty `technical_details` without `technical` evidence on fully
-  role-aware data.
-- URL normalization and normalized-URL duplicate removal produce information
-  findings. Verify reuses Research's existing HTTP(S) normalization behavior,
-  performs no DNS validation, and changes only copied output objects.
-- The dedicated `benchmark_information` field safely establishes when benchmark
-  evidence is required; the verifier does not scan prose for keywords.
-- Legacy or mixed role-less items warn and skip role-coverage hard failures,
-  preventing old v0.1 JSON from being rejected solely for lacking new metadata.
-- Provenance from completed web-search calls remains enforced by Research.
-  Verify cannot reconstruct or independently check that allow-list from a saved
-  `ResearchRun` because the tool-call metadata is not persisted.
+No production, prompt, test, configuration, generated data, or report file was
+changed. The temporary `/tmp/ai_weekly_phase42_smoke.py` runner was deleted.
 
 ## Commands / Tests Run
 
 - `git status --short`
-- Read `AGENTS.md`, `CODEX_HANDOFF.md`, the Phase 4.1 request, current models,
-  Research implementation/prompt, and relevant tests with `sed` and `rg`.
-- `.venv/bin/python -m pytest tests/test_models.py tests/test_research.py tests/test_verify.py`
-- `.venv/bin/python -m pytest` (run twice after final refinements)
 - `git diff --check`
+- `git check-ignore -v .env`
+- `.venv/bin/python -m pytest`
+- Local SDK/config/signature inspection with `.venv/bin/python -c ...`; it
+  printed only configuration presence and the non-secret model name.
+- `PYTHONPATH=src .venv/bin/python /tmp/ai_weekly_phase42_smoke.py` — executed
+  once for the single live Research operation and in-memory verification.
+- `.venv/bin/python -m pytest`
 - `git status --short`
 
 ## Test Results
 
-- Focused Phase 4.1 tests: 90 passed.
-- Final complete offline suite: 210 passed in 1.61 seconds.
-- Zero live OpenAI API calls, web searches, or other network requests were made.
+- Before the live smoke test: 210 tests passed in 1.41 seconds.
+- After the live smoke test: 210 tests passed in 1.03 seconds.
+- `.env` is ignored by Git.
 
 ## Known Issues
 
-- Evidence roles are Research-produced metadata and do not prove that a source
-  page actually contains the classified evidence.
-- Saved `ResearchRun` JSON does not retain the completed web-search provenance
-  allow-list, so Verify relies on Research having already enforced provenance.
-- To preserve backward compatibility, any usable source with
-  `evidence_roles=None` makes role-coverage checks warning-only for that item.
-- `source_type` remains a free string in the v0.1 schema. The secondary-only
-  warning is therefore emitted only when every usable source is explicitly
-  `secondary`; unknown types are not guessed.
+- Evidence roles remain model-produced metadata rather than independent
+  source-content verification.
+- The current Research return type discards response usage, tool-call counts,
+  and HTTP retry visibility; those concerns belong to later telemetry work.
+- Mutable product pages can still be classified as event/date evidence by
+  Research. The existing prompt discourages relying on such pages alone for
+  historical launch claims, but Verify cannot semantically detect that case.
 
 ## Open Questions
 
-None for Phase 4.1.
+None blocking Phase 4.3.
 
 ## Recommended Next Step
 
-After explicit approval, perform Phase 4.2: one controlled single-category live
-Research/Verify compatibility smoke test. Do not integrate Verify into the CLI
-or begin telemetry during that smoke test.
+Implement Phase 4.3: configurable OpenAI retry/timeout settings and centralized
+client creation, with offline tests only.
