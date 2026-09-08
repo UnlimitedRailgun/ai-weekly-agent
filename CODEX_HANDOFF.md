@@ -2,135 +2,218 @@
 
 ## Task
 
-Perform one controlled full v0.2 end-to-end live CLI validation run.
+Complete the full v0.2 end-to-end live validation by inspecting the artifacts
+from the user's successful manual CLI run, reconciling telemetry, and running
+offline regression tests.
 
 ## Status
 
-Failed: the required external execution approval timed out before the CLI
-process was created. No live run or project API request occurred.
+Passed.
 
 ## Summary
 
-All pre-run gates passed, but the live command could not start. The initial
-approval request and its one permitted retry both expired during automatic
-permission review with `CreateProcess` not created. Work stopped without using
-another execution route, changing production code, or creating target
-artifacts.
+The successful live run completed the integrated pipeline and produced valid
+raw Research, Markdown, and RunRecord artifacts. Offline Verify reproduced the
+CLI counts without mutating Research. All eight logical API calls and the
+271,930-token total reconcile exactly. The offline suite remains green and no
+application defect was found.
+
+## Live Attempts
+
+### Attempt 1
+
+- One Research logical call failed with external `APIConnectionError` while
+  `OPENAI_MAX_RETRIES=0`.
+- A truthful partial-failure RunRecord was saved with no raw/report artifact and
+  no invented downstream counts.
+- This live attempt validated the partial-failure observability path. The later
+  success RunRecord atomically replaced the same-range failure record.
+
+### Attempt 2
+
+- The user manually performed one successful full E2E CLI run.
+- Its artifacts and RunRecord are authoritative for the metrics below.
 
 ## Live Configuration
 
 - Date range: `2026-08-30` through `2026-09-05`, inclusive.
-- Configured model: `gpt-5.6-terra`.
-- Intended invocation override: `OPENAI_MAX_RETRIES=0`.
-- `OPENAI_TIMEOUT_SECONDS`: unset; the SDK default would have been preserved.
-- Overwrite: not requested; no target artifact collision existed.
-- Elapsed time: not applicable because the process never started.
-- API key presence was confirmed without reading or printing its value.
+- Requested and response model: `gpt-5.6-terra` on all eight calls.
+- `OPENAI_MAX_RETRIES=0` explicitly.
+- `OPENAI_TIMEOUT_SECONDS=None`; no SDK default was inferred.
+- `--overwrite` was not used; target artifacts did not previously exist.
+- Approximate duration from RunRecord timestamps: 295.8 seconds.
+- Application version remained `0.1.0`, as required before Phase 4.7.
 
 ## Pipeline Outcome
 
-- Research: not started.
-- Raw save: not started.
-- Verify: not started.
-- Curate: not started.
-- Report: not started.
-- Markdown save: not started.
-- RunRecord save: not started.
+Successful order:
+
+`Research -> raw save -> Verify -> Curate -> Report -> Markdown save ->
+RunRecord save`
+
+All stages and all three persistence checkpoints completed.
 
 ## Research Statistics
 
-Not available because no live Research call occurred.
+- DateRange parsed correctly through `ResearchRun`.
+- Canonical categories: 6, each present exactly once.
+- Original items: 16.
+- Source records: 19; usable sources: 19.
+- `evidence_roles=None`: 0.
+- Empty evidence-role lists: 0.
+- Non-empty evidence-role lists: 19.
+- Role occurrences: `event` 17, `event_date` 17, `technical` 19,
+  `benchmark` 4, `background` 0.
+- Pydantic parsing found no invalid evidence roles. Evidence roles remain
+  model-reported classifications, not independent proof of page content.
+- Phase 4.2's 7/7 role-aware one-category result generalized to 19/19 sources
+  across all six categories.
 
 ## Verification Statistics
 
-Not available because Verify did not run.
+- Original items: 16.
+- Accepted: 16.
+- Rejected: 0.
+- Warnings: 1.
+- Information findings: 0.
+- Finding: `category_05:item_001`, code `secondary_sources_only`, for
+  "ABEJA and Murata demonstrated a dual-arm VLA manipulation workflow for
+  laboratory automation". Deterministic reason: every usable source was
+  classified as secondary.
+- The input `ResearchRun` serialized identically before and after offline
+  Verify.
+- The live run did not exercise rejected-item raw persistence, but that
+  invariant remains covered by offline Main integration tests.
 
-## Curator / Report Statistics
+## Curator and Report Statistics
 
-Not available because Curator and Report did not run.
+- Items entering Curator: 16.
+- Curated items: 12; `MAX_CURATED_ITEMS=12` was respected.
+- All 12 report story titles occur in raw Research.
+- No exact or normalized duplicate story heading was found.
+- Report: 35,364 bytes, 480 lines, 12 represented stories, and 24 Markdown
+  source links.
+- Expected sections are present: title, `This Week in 60 Seconds`,
+  `Major Updates`, `Concepts Worth Learning`, and `Source Index`.
+- No unresolved template placeholder, raw JSON/Pydantic/debug marker,
+  telemetry field, API-key variable, authorization marker, or credential-like
+  `sk-...` token was found.
 
 ## Telemetry
 
-No RunRecord exists for the target range. Live logical API calls: `0`.
-Stage distribution, response models, and token usage are not available.
+RunRecord schema version 1 parsed successfully with `status=success`, null
+`error_stage`, the exact DateRange, `max_retries=0`, and null timeout.
+
+| # | Stage | Requested model | Response model | Status | Input tokens | Output tokens | Total tokens |
+| -: | --- | --- | --- | --- | ---: | ---: | ---: |
+| 1 | research | gpt-5.6-terra | gpt-5.6-terra | success | 39,410 | 2,314 | 41,724 |
+| 2 | research | gpt-5.6-terra | gpt-5.6-terra | success | 40,980 | 1,968 | 42,948 |
+| 3 | research | gpt-5.6-terra | gpt-5.6-terra | success | 40,290 | 2,108 | 42,398 |
+| 4 | research | gpt-5.6-terra | gpt-5.6-terra | success | 40,870 | 1,600 | 42,470 |
+| 5 | research | gpt-5.6-terra | gpt-5.6-terra | success | 38,262 | 2,030 | 40,292 |
+| 6 | research | gpt-5.6-terra | gpt-5.6-terra | success | 41,136 | 1,854 | 42,990 |
+| 7 | curate | gpt-5.6-terra | gpt-5.6-terra | success | 7,748 | 621 | 8,369 |
+| 8 | report | gpt-5.6-terra | gpt-5.6-terra | success | 5,627 | 5,112 | 10,739 |
+
+- Logical calls: 8 successful, 0 failed.
+- Stage distribution: Research 6, Curate 1, Report 1, Verify 0.
+- Aggregate usage: 254,323 input, 17,607 output, 271,930 total tokens;
+  `usage_complete=true`.
+- Per-call sums equal every stored aggregate exactly.
+
+| Stage | Calls | Input tokens | Output tokens | Total tokens | % of total |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Research | 6 | 240,948 | 11,874 | 252,822 | 92.97% |
+| Curate | 1 | 7,748 | 621 | 8,369 | 3.08% |
+| Report | 1 | 5,627 | 5,112 | 10,739 | 3.95% |
+
+Research call totals ranged from 40,292 to 42,990, averaging 42,137. The
+maximum was 2.02% above the mean and the minimum 4.38% below it, so no single
+Research call is a clear outlier. Telemetry does not store Research category,
+so individual Research calls cannot be mapped to categories without guessing.
+The large total is internally consistent and is concentrated across all six
+Research calls; it is not evidence of a telemetry defect. No quantitative
+v0.1 comparison is available.
 
 ## Artifacts
 
-No artifact was created for `2026-08-30` through `2026-09-05`:
+- `data/raw/2026-08-30_to_2026-09-05.json`: exists, valid `ResearchRun`, and
+  preserves all 16 original items.
+- `reports/2026-W36.md`: exists, non-empty, and structurally valid.
+- `data/runs/2026-08-30_to_2026-09-05.json`: exists, valid `RunRecord`, with
+  matching recorded path and existing raw/report paths.
 
-- Raw: `data/raw/2026-08-30_to_2026-09-05.json` — absent.
-- Report: `reports/2026-W36.md` — absent.
-- RunRecord: `data/runs/2026-08-30_to_2026-09-05.json` — absent.
+All three are ignored by current repository policy and remain uncommitted.
+They were inspected but not modified.
 
-Existing ignored artifacts for other date ranges were not modified.
+## v0.1 Compatibility
 
-## v0.1 Compatibility Comparison
-
-| Area | v0.1 expectation | v0.2 live result |
+| Area | v0.1 expectation | v0.2 observed result |
 | --- | --- | --- |
-| Six-category Research | yes | not evaluated |
-| Raw Research saved | yes | not evaluated |
-| Curator call | yes | not evaluated |
-| Report call | yes | not evaluated |
-| Markdown report | yes | not evaluated |
-| Deterministic Verify | no | not evaluated |
-| Evidence filtering | no | not evaluated |
-| API telemetry | no | not evaluated |
-| Token accounting | no | not evaluated |
-| RunRecord | no | not evaluated |
+| Six-category Research | yes | completed 6/6 |
+| Raw Research saved | yes | valid original 16-item JSON |
+| Curator call | yes | completed once with 16 accepted items |
+| Report call | yes | completed once |
+| Markdown report | yes | valid 12-story report |
+| Deterministic Verify | no | completed locally, no API call |
+| Evidence filtering | no | 16 accepted, 0 rejected, 1 warning |
+| API telemetry | no | 8 coherent logical-call records |
+| Token accounting | no | complete and exactly reconciled |
+| RunRecord | no | valid successful schema-v1 artifact |
+
+The v0.1 external Research, Curator, Report, raw-save, and Markdown behaviors
+remain present. v0.2 adds Verify and observability without changing report
+format or overwrite semantics.
 
 ## Files Changed
 
 - `/home/shanl/ai-weekly-agent/CODEX_HANDOFF.md`
 
 No production code, tests, prompts, README, AGENTS guidance, version metadata,
-raw data, reports, or RunRecords were changed.
+or generated artifact was changed.
 
 ## Important Decisions
 
-- The two permission timeouts were not counted as live CLI runs because the
-  execution tool reported that process creation never occurred.
-- No unapproved or sandboxed fallback command was attempted after the one
-  allowed approval retry.
-- No Phase 4.6a code change is recommended; no application defect was observed.
+- Attempt 2's success RunRecord is authoritative for success metrics; Attempt
+  1 is documented separately as a successful partial-failure-path exercise.
+- `271,930` is accepted as correctly recorded because all per-call, per-stage,
+  and aggregate values reconcile exactly.
+- The secondary-source warning is an expected evidence-quality diagnostic, not
+  an integration or schema defect.
 
 ## Commands / Tests Run
 
+- Parsed raw Research with `ResearchRun.model_validate_json(...)` and reran
+  `verify_research_run(...)` offline.
+- Parsed telemetry with `RunRecord.model_validate_json(...)` and calculated
+  per-call/per-stage reconciliation locally.
+- Inspected report structure and safe leak markers with local Python and `rg`.
 - `.venv/bin/python -m pytest`
 - `git diff --check`
 - `git status --short`
-- `git check-ignore -v .env`
-- Safe configuration-presence inspection via `.venv/bin/python -c ...`; the
-  API key value was neither read nor printed.
-- Target artifact inspection with `find`.
-- Requested twice (initial attempt plus one permitted approval retry), but not
-  started: `/usr/bin/time -p env OPENAI_MAX_RETRIES=0 .venv/bin/python -m
-  ai_weekly_agent.main --start 2026-08-30 --end 2026-09-05`.
+- `git check-ignore -v` for all three generated artifacts.
 
 ## Test Results
 
-- Pre-run complete offline suite: 269 passed in 0.89 seconds.
-- Pre-run `git diff --check`: passed.
-- `.env` is ignored by `.gitignore`.
-- Pre-run tracked worktree: clean.
-- Post-run suite: not run because no live process started and repository state
-  did not change before this handoff update.
-- Live CLI executions: 0. Live Responses API requests: 0.
+- Final offline suite: 269 passed in 1.05 seconds.
+- `git diff --check`: passed before the handoff-only update.
+- Tracked worktree was clean before this handoff-only update.
+- Live API/model calls during this inspection: 0.
+- Production code changes: 0.
 
 ## Known Issues
 
-- Phase 4.6 live validation remains incomplete because external execution
-  approval timed out twice before process creation.
 - Evidence roles remain model-reported classifications.
 - Deterministic Verify cannot semantically prove historical claims on mutable
   product pages.
 - SDK-internal HTTP retry attempts remain invisible to logical-call telemetry.
-- Token usage can be incomplete when a response omits required usage metadata.
+- Research category identity is not recorded per telemetry call.
+- The first live attempt encountered a transient external connection failure;
+  retry-zero behavior and partial-failure persistence worked as designed.
 
 ## Open Questions
 
-- Can the exact controlled CLI command receive explicit external execution and
-  network approval in a subsequent task?
+None blocking Phase 4.7.
 
 ## Git Status
 
@@ -138,8 +221,13 @@ Expected final tracked state:
 
 - modified: `CODEX_HANDOFF.md`
 
+The three live artifacts remain ignored and uncommitted.
+
 ## Recommended Next Step
 
-Repeat Phase 4.6 after explicit execution/network approval is available. Use
-the same fixed range and one CLI invocation with `OPENAI_MAX_RETRIES=0`. Do not
-begin Phase 4.7 or make a Phase 4.6a code change until live validation runs.
+Proceed to Phase 4.7:
+
+`final v0.2 release-readiness review -> version bump from 0.1.0 to 0.2.0 ->
+final regression -> release commit/checkpoint -> tag v0.2.0 -> GitHub Release`
+
+Do not perform these release actions as part of Phase 4.6.
