@@ -9,10 +9,9 @@ import tempfile
 from typing import Annotated, Any
 from urllib.parse import urlsplit, urlunsplit
 
-from openai import OpenAI
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints, ValidationError
 
-from ai_weekly_agent.config import AppConfig
+from ai_weekly_agent.config import AppConfig, create_openai_client
 from ai_weekly_agent.dates import weekly_report_filename
 from ai_weekly_agent.models import CuratedItem, DateRange, Source
 
@@ -95,9 +94,7 @@ def generate_report(
 
     model = _require_openai_configuration(config)
     prompt = _render_prompt(date_range, items)
-    api_client = client if client is not None else OpenAI(
-        api_key=config.openai_api_key
-    )
+    api_client = client if client is not None else create_openai_client(config)
 
     try:
         response = api_client.responses.parse(

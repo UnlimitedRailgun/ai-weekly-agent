@@ -180,6 +180,32 @@ def test_configured_openai_model_is_used() -> None:
     assert client.responses.calls[0]["text_format"] is ReportContent
 
 
+def test_report_fallback_uses_centralized_client_factory(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = FakeClient(
+        FakeResponses(report_payload(explanation("story_001")))
+    )
+    config = configured_app()
+    factory_calls: list[AppConfig] = []
+
+    def fake_factory(received_config: AppConfig) -> FakeClient:
+        factory_calls.append(received_config)
+        return client
+
+    monkeypatch.setattr(report_module, "create_openai_client", fake_factory)
+
+    markdown = generate_report(
+        DATE_RANGE,
+        [make_curated_item()],
+        config,
+    )
+
+    assert factory_calls == [config]
+    assert len(client.responses.calls) == 1
+    assert markdown.startswith("# AI & Computer Engineering Weekly")
+
+
 def test_multiple_stories_use_exactly_one_llm_request() -> None:
     items = [make_curated_item("First"), make_curated_item("Second")]
 

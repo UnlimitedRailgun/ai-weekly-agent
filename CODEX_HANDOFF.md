@@ -1,152 +1,132 @@
-# Codex Handoff — AI Weekly Agent v0.2 Phase 4.2
+# Codex Handoff — AI Weekly Agent v0.2 Phase 4.3
 
 ## Task
 
-Perform one controlled live Research/Verify compatibility smoke test for the
-v0.2 evidence-role schema and deterministic verifier.
+Implement v0.2 Phase 4.3: configurable OpenAI SDK retries and request timeout,
+centralized client construction, and offline tests.
 
 ## Status
 
-Passed.
+Completed.
 
 ## Summary
 
-Exactly one live `AI model releases` Research category operation completed
-successfully. Structured output populated every retained source with meaningful,
-non-empty evidence roles. An in-memory complete `ResearchRun`, using five empty
-synthetic category results as structural scaffolding, was consumed by Verify
-without production changes. All three live items were accepted, and verification
-did not mutate the live Research result.
-
-## Live Configuration
-
-- Category: `AI model releases`
-- Inclusive date range: `2026-08-30` through `2026-09-05`
-- Runtime model: `gpt-5.6-terra`
-- Installed OpenAI SDK: `3.8.0`
-- Retry behavior: Research constructed its normal client, so the SDK default
-  `max_retries=2` was in effect. No manual/application retry was made. The
-  number of underlying HTTP attempts is not observable through the current
-  Research return value.
-- Persistence: disabled. No raw Research JSON or weekly report was saved.
-- Approximate elapsed time: 43.87 seconds.
-
-## Research Result
-
-- Researched items: 3
-- Usable retained sources: 7
-- Sources with `evidence_roles=None`: 0
-- Sources with empty evidence roles: 0
-- Sources with one or more roles: 7
-- Sources with duplicate roles: 0
-- Role occurrences:
-  - `event`: 5
-  - `event_date`: 5
-  - `technical`: 7
-  - `benchmark`: 3
-  - `background`: 0
-
-Item coverage:
-
-- `category_01:item_001` — “Anthropic releases Claude Fable 5.1 and Claude
-  Mythos 5.1”; date `2026-09-01`; 2 sources; roles `event`, `event_date`,
-  `technical`; all required event/date/technical coverage present; no benchmark
-  claim.
-- `category_01:item_002` — “Google introduces Gemini 3.8 Flash and Gemini 3.8
-  Flash Cyber”; date `2026-09-02`; 3 sources; roles `event`, `event_date`,
-  `technical`, `benchmark`; all required coverage present.
-- `category_01:item_003` — “OpenAI releases GPT-6 Astra to a limited initial
-  set of organizations”; date `2026-09-03`; 2 sources; roles `event`,
-  `event_date`, `technical`, `benchmark`; all required coverage present.
-
-These are Research-produced classifications. This smoke test did not
-independently verify the claims or source-page contents. The first item used
-sources labelled as mutable product pages for event/date evidence, which remains
-a manual evidence-quality consideration even though its structure passed.
-
-## Verification Result
-
-- Live items accepted: 3
-- Live items rejected: 0
-- Warning findings: 0
-- Information findings: 0
-- Finding codes: none
-- Rejected item IDs/reasons: none
-- Synthetic scaffolding: five empty canonical category results, in memory only
-- Synthetic findings: 0
-- Original live input unchanged:
-  `live_input_before == live_input_after` was `True`
-
-## Compatibility Conclusion
-
-- Structured output parsed: yes.
-- New Sources populated evidence roles: yes, 7 of 7.
-- Null role values: none.
-- Empty role lists: none.
-- Invalid or duplicate roles: none.
-- Verifier consumed the result: yes.
-- Original live input remained unchanged: yes.
-- Phase 4.1 production change necessary: no.
-
-This is a schema/verifier compatibility pass. No item was rejected for
-evidence-quality coverage, and backward compatibility did not conceal missing
-roles.
-
-## API / Network Activity
-
-- One logical live `research_category()` invocation was made.
-- That invocation made one logical `responses.parse()` request and allowed the
-  existing built-in `web_search` tool behavior. The current implementation
-  does not expose the number of underlying SDK HTTP attempts or completed
-  built-in search calls from its returned category result, so those counts are
-  not estimated.
-- No other Research categories, Curator, Report, or Main calls were made.
-- No follow-up searches were made to investigate the returned stories.
-- Before the smoke test, one official OpenAI documentation search and one page
-  fetch confirmed the current Responses API parameters. These were documentation
-  lookups, not model/category Research calls.
+Added optional retry and timeout settings to `AppConfig`, parsed them from the
+existing environment configuration, and introduced one canonical
+`create_openai_client()` factory. Research, Curator, and Report retain their
+existing `client=` injection and standalone fallback behavior, but every
+production fallback now uses the factory. No telemetry or Verify/Main
+integration was introduced.
 
 ## Files Changed
 
+- `/home/shanl/ai-weekly-agent/.env.example`
+- `/home/shanl/ai-weekly-agent/src/ai_weekly_agent/config.py`
+- `/home/shanl/ai-weekly-agent/src/ai_weekly_agent/research.py`
+- `/home/shanl/ai-weekly-agent/src/ai_weekly_agent/curate.py`
+- `/home/shanl/ai-weekly-agent/src/ai_weekly_agent/report.py`
+- `/home/shanl/ai-weekly-agent/tests/test_config.py`
+- `/home/shanl/ai-weekly-agent/tests/test_research.py`
+- `/home/shanl/ai-weekly-agent/tests/test_curate.py`
+- `/home/shanl/ai-weekly-agent/tests/test_report.py`
 - `/home/shanl/ai-weekly-agent/CODEX_HANDOFF.md`
 
-No production, prompt, test, configuration, generated data, or report file was
-changed. The temporary `/tmp/ai_weekly_phase42_smoke.py` runner was deleted.
+## Important Decisions
+
+- Added `openai_max_retries: int | None` with a minimum of zero and
+  `openai_timeout_seconds: float | None` constrained to positive, finite
+  values.
+- `OPENAI_MAX_RETRIES` accepts integer text, including `0`; non-integer and
+  negative values fail clearly. `OPENAI_TIMEOUT_SECONDS` accepts positive
+  integer or decimal text; nonnumeric, non-finite, zero, and negative values
+  fail clearly.
+- Blank or whitespace-only reliability environment values become `None`.
+- When retry is unset, `max_retries` is omitted from `OpenAI(...)`. When
+  timeout is unset, `timeout` is omitted. This preserves current and future
+  SDK defaults rather than copying them into application configuration.
+- `max_retries=0` is passed explicitly and is never dropped by truthiness
+  handling.
+- `create_openai_client()` passes the existing API key and only configured
+  optional SDK arguments. It performs no logging, retry loop, transport
+  customization, telemetry, or stage-specific work.
+- Research, Curator, and Report still accept explicitly injected fake/shared
+  clients. When omitted, each stage calls the central factory. Within
+  `research_all_categories()`, the one factory-created Research client remains
+  shared across all category calls.
+- Main remains unchanged to avoid mixing reliability configuration with later
+  telemetry/orchestration work. It still causes separate fallback clients for
+  Research, Curator, and Report, but all three use the same canonical factory
+  and reliability settings. One cross-stage shared client is deferred to the
+  telemetry/Main integration phase.
+- Official OpenAI Python documentation confirms that retries and timeouts are
+  SDK client options; no second application retry system was added.
 
 ## Commands / Tests Run
 
-- `git status --short`
+- Read the Phase 4.3 request, `AGENTS.md`, `CODEX_HANDOFF.md`, configuration,
+  stage modules, Main, environment example, and relevant tests with `sed` and
+  `rg`.
+- Consulted the official OpenAI Python API library documentation for SDK retry
+  and timeout behavior.
+- `.venv/bin/python -m pytest tests/test_config.py`
+- `.venv/bin/python -m pytest tests/test_config.py tests/test_research.py tests/test_curate.py tests/test_report.py`
+- `.venv/bin/python -m pytest`
 - `git diff --check`
-- `git check-ignore -v .env`
-- `.venv/bin/python -m pytest`
-- Local SDK/config/signature inspection with `.venv/bin/python -c ...`; it
-  printed only configuration presence and the non-secret model name.
-- `PYTHONPATH=src .venv/bin/python /tmp/ai_weekly_phase42_smoke.py` — executed
-  once for the single live Research operation and in-memory verification.
-- `.venv/bin/python -m pytest`
 - `git status --short`
+- `rg -n "\\bOpenAI\\(" src/ai_weekly_agent`
+- Scope audit for deferred Verify, telemetry, and RunRecord integration with
+  `rg`.
 
 ## Test Results
 
-- Before the live smoke test: 210 tests passed in 1.41 seconds.
-- After the live smoke test: 210 tests passed in 1.03 seconds.
-- `.env` is ignored by Git.
+- Configuration-only tests: 26 passed.
+- Focused configuration/stage tests: 163 passed.
+- Complete offline suite: 236 passed in 1.02 seconds.
+- Tests made zero live OpenAI/model calls and zero project Research/web calls.
+- The only network activity was official OpenAI documentation lookup.
+
+## Compatibility
+
+- Existing Research, Curator, and Report fake-client injection remains
+  functional and is covered by the full regression suite.
+- Existing direct stage signatures remain unchanged.
+- CLI arguments and progress messages changed: no.
+- Research behavior, call budget, and provenance semantics changed: no.
+- Curator behavior changed: no.
+- Report behavior or Markdown format changed: no.
+- Phase 4.1 verification behavior changed: no.
+- Main orchestration or Verify integration changed: no.
 
 ## Known Issues
 
-- Evidence roles remain model-produced metadata rather than independent
-  source-content verification.
-- The current Research return type discards response usage, tool-call counts,
-  and HTTP retry visibility; those concerns belong to later telemetry work.
-- Mutable product pages can still be classified as event/date evidence by
-  Research. The existing prompt discourages relying on such pages alone for
-  historical launch claims, but Verify cannot semantically detect that case.
+- Main does not yet create one client shared across Research, Curator, and
+  Report. This is intentionally deferred so telemetry can wrap a single owned
+  boundary during later Main integration.
+- SDK retry attempts are not observable and response usage remains discarded;
+  both remain deferred telemetry concerns.
 
 ## Open Questions
 
-None blocking Phase 4.3.
+None for Phase 4.3.
+
+## Git Status
+
+Expected modified files:
+
+- `.env.example`
+- `src/ai_weekly_agent/config.py`
+- `src/ai_weekly_agent/curate.py`
+- `src/ai_weekly_agent/report.py`
+- `src/ai_weekly_agent/research.py`
+- `tests/test_config.py`
+- `tests/test_curate.py`
+- `tests/test_report.py`
+- `tests/test_research.py`
+- `CODEX_HANDOFF.md`
+
+No unrelated or generated files are present.
 
 ## Recommended Next Step
 
-Implement Phase 4.3: configurable OpenAI retry/timeout settings and centralized
-client creation, with offline tests only.
+Implement Phase 4.4: telemetry observation, aggregation, and atomic local
+`RunRecord` persistence with offline tests only.

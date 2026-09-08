@@ -7,10 +7,9 @@ import tempfile
 from typing import Any
 from urllib.parse import urlsplit, urlunsplit
 
-from openai import OpenAI
 from pydantic import ValidationError
 
-from ai_weekly_agent.config import AppConfig
+from ai_weekly_agent.config import AppConfig, create_openai_client
 from ai_weekly_agent.dates import raw_research_filename
 from ai_weekly_agent.models import (
     CategoryResearchResult,
@@ -57,9 +56,7 @@ def research_category(
         raise ResearchError(f"Unsupported research category: {category}")
 
     prompt = _render_prompt(date_range, category)
-    api_client = client if client is not None else OpenAI(
-        api_key=config.openai_api_key
-    )
+    api_client = client if client is not None else create_openai_client(config)
 
     try:
         response = api_client.responses.parse(
@@ -121,9 +118,7 @@ def research_all_categories(
 ) -> ResearchRun:
     """Research all Version 0.1 categories sequentially in fixed order."""
     _require_openai_configuration(config)
-    api_client = client if client is not None else OpenAI(
-        api_key=config.openai_api_key
-    )
+    api_client = client if client is not None else create_openai_client(config)
     categories = [
         research_category(
             date_range,

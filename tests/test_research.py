@@ -131,6 +131,25 @@ def test_research_uses_configured_model() -> None:
     assert client.responses.calls[0]["model"] == "test-model"
 
 
+def test_research_fallback_uses_centralized_client_factory(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = client_for(single_result())
+    config = configured_app()
+    factory_calls: list[AppConfig] = []
+
+    def fake_factory(received_config: AppConfig) -> FakeClient:
+        factory_calls.append(received_config)
+        return client
+
+    monkeypatch.setattr(research_module, "create_openai_client", fake_factory)
+
+    research_category(DATE_RANGE, CATEGORY, config)
+
+    assert factory_calls == [config]
+    assert len(client.responses.calls) == 1
+
+
 def test_research_enables_web_search_and_source_metadata() -> None:
     client = client_for(single_result())
 

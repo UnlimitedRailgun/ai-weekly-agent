@@ -3,6 +3,7 @@ from typing import Any
 
 import pytest
 
+import ai_weekly_agent.curate as curate_module
 from ai_weekly_agent.config import AppConfig
 from ai_weekly_agent.curate import (
     MAX_CURATED_ITEMS,
@@ -158,6 +159,26 @@ def test_empty_research_run_returns_without_api_call() -> None:
 
     assert result == []
     assert responses.calls == []
+
+
+def test_curator_fallback_uses_centralized_client_factory(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = client_for(assessment("candidate_001"))
+    config = configured_app()
+    factory_calls: list[AppConfig] = []
+
+    def fake_factory(received_config: AppConfig) -> FakeClient:
+        factory_calls.append(received_config)
+        return client
+
+    monkeypatch.setattr(curate_module, "create_openai_client", fake_factory)
+
+    result = curate_research_run(one_category_run(make_item("First")), config)
+
+    assert factory_calls == [config]
+    assert len(client.responses.calls) == 1
+    assert len(result) == 1
 
 
 def test_candidates_are_flattened_in_category_and_item_order() -> None:

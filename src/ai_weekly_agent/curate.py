@@ -8,10 +8,9 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit, urlunsplit
 
-from openai import OpenAI
 from pydantic import BaseModel, ValidationError
 
-from ai_weekly_agent.config import AppConfig
+from ai_weekly_agent.config import AppConfig, create_openai_client
 from ai_weekly_agent.models import (
     CurationAssessment,
     CuratedItem,
@@ -72,9 +71,7 @@ def curate_research_run(
 
     model = _require_openai_configuration(config)
     prompt = _render_prompt(candidates)
-    api_client = client if client is not None else OpenAI(
-        api_key=config.openai_api_key
-    )
+    api_client = client if client is not None else create_openai_client(config)
 
     try:
         response = api_client.responses.parse(
