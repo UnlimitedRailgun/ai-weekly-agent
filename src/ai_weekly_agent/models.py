@@ -1,9 +1,40 @@
-"""Pydantic models shared by the Version 0.1 pipeline."""
+"""Pydantic models shared by the application pipeline."""
 
 from datetime import date
-from typing import Self
+from typing import Literal, Self
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    field_validator,
+    model_validator,
+)
+
+
+EvidenceRole = Literal[
+    "event",
+    "event_date",
+    "technical",
+    "benchmark",
+    "background",
+]
+VerificationSeverity = Literal["hard_failure", "warning", "info"]
+VerificationCode = Literal[
+    "no_usable_source",
+    "category_mismatch",
+    "event_date_out_of_range",
+    "event_evidence_missing",
+    "event_date_evidence_missing",
+    "benchmark_evidence_missing",
+    "legacy_evidence_roles",
+    "unknown_event_date",
+    "unusable_source_removed",
+    "secondary_sources_only",
+    "technical_evidence_missing",
+    "source_url_normalized",
+    "duplicate_source_removed",
+]
 
 
 class DateRange(BaseModel):
@@ -28,6 +59,17 @@ class Source(BaseModel):
     title: str = Field(min_length=1)
     url: str = Field(min_length=1)
     source_type: str = Field(min_length=1)
+    evidence_roles: list[EvidenceRole] | None = None
+
+    @field_validator("evidence_roles")
+    @classmethod
+    def validate_unique_evidence_roles(
+        cls, roles: list[EvidenceRole] | None
+    ) -> list[EvidenceRole] | None:
+        """Reject ambiguous duplicate evidence classifications."""
+        if roles is not None and len(roles) != len(set(roles)):
+            raise ValueError("evidence_roles must not contain duplicates")
+        return roles
 
 
 class NewsItem(BaseModel):
@@ -57,6 +99,24 @@ class ResearchRun(BaseModel):
 
     date_range: DateRange
     categories: list[CategoryResearchResult] = Field(default_factory=list)
+
+
+class VerificationFinding(BaseModel):
+    """One deterministic evidence or structure finding for a research item."""
+
+    item_id: str = Field(min_length=1)
+    severity: VerificationSeverity
+    code: VerificationCode
+    message: str = Field(min_length=1)
+    source_url: str | None = None
+
+
+class VerificationResult(BaseModel):
+    """Accepted research and diagnostics produced without mutating the input."""
+
+    accepted_run: ResearchRun
+    findings: list[VerificationFinding] = Field(default_factory=list)
+    rejected_item_ids: list[str] = Field(default_factory=list)
 
 
 class CurationAssessment(BaseModel):

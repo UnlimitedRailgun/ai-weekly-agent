@@ -238,6 +238,27 @@ def test_research_prompt_separates_performance_claims(
     assert "Never invent or infer benchmark numbers" in research_prompt
 
 
+def test_research_prompt_requests_source_evidence_roles(
+    research_prompt: str,
+) -> None:
+    assert "Populate `evidence_roles` for every source" in research_prompt
+    assert "source may have more than one role" in research_prompt
+    for role in (
+        "event",
+        "event_date",
+        "technical",
+        "benchmark",
+        "background",
+    ):
+        assert f"`{role}`" in research_prompt
+    assert '["event", "event_date", "technical"]' in research_prompt
+    assert '["benchmark", "technical"]' in research_prompt
+    assert '["background"]' in research_prompt
+    assert "Do not assign a role unless that specific source supports it" in (
+        research_prompt
+    )
+
+
 def test_structured_output_becomes_category_result() -> None:
     client = client_for(single_result(candidate()))
 

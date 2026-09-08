@@ -229,7 +229,7 @@ def _supported_sources(
     seen: set[str] = set()
 
     for source in sources:
-        normalized_url = _normalize_url(source.url)
+        normalized_url = normalize_source_url(source.url)
         if (
             normalized_url is None
             or normalized_url not in allowed_urls
@@ -259,18 +259,19 @@ def _web_search_urls(response: object) -> set[str]:
             continue
 
         for source in _value(action, "sources") or []:
-            normalized_url = _normalize_url(_value(source, "url"))
+            normalized_url = normalize_source_url(_value(source, "url"))
             if normalized_url is not None:
                 urls.add(normalized_url)
 
-        normalized_action_url = _normalize_url(_value(action, "url"))
+        normalized_action_url = normalize_source_url(_value(action, "url"))
         if normalized_action_url is not None:
             urls.add(normalized_action_url)
 
     return urls
 
 
-def _normalize_url(value: object) -> str | None:
+def normalize_source_url(value: object) -> str | None:
+    """Return the canonical HTTP(S) URL form used by Research and Verify."""
     if not isinstance(value, str):
         return None
 

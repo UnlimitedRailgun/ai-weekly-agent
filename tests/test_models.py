@@ -30,6 +30,42 @@ def test_valid_source() -> None:
     source = make_source()
 
     assert source.source_type == "official"
+    assert source.evidence_roles is None
+
+
+def test_source_accepts_and_round_trips_evidence_roles() -> None:
+    source = Source(
+        title="Official announcement",
+        url="https://example.com/announcement",
+        source_type="official",
+        evidence_roles=["event", "event_date", "technical"],
+    )
+
+    restored = Source.model_validate_json(source.model_dump_json())
+
+    assert restored == source
+
+
+def test_source_rejects_invalid_evidence_role() -> None:
+    with pytest.raises(ValidationError):
+        Source(
+            title="Official announcement",
+            url="https://example.com/announcement",
+            source_type="official",
+            evidence_roles=["unsupported"],
+        )
+
+
+def test_source_rejects_duplicate_evidence_roles() -> None:
+    with pytest.raises(
+        ValidationError, match="evidence_roles must not contain duplicates"
+    ):
+        Source(
+            title="Official announcement",
+            url="https://example.com/announcement",
+            source_type="official",
+            evidence_roles=["event", "event"],
+        )
 
 
 def test_news_item_accepts_missing_benchmark_information() -> None:

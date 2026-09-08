@@ -73,6 +73,22 @@ For each item:
 - Associate at least one directly supporting source with the item. Each source
   needs a descriptive title, its exact URL, and one of these source types:
   `official`, `paper`, `github`, `university`, `benchmark`, or `secondary`.
+- Populate `evidence_roles` for every source with the claims that particular
+  source actually supports. A source may have more than one role. Use only:
+  - `event`: directly supports that the event, release, or update occurred.
+  - `event_date`: supports the date or date range of the event.
+  - `technical`: supports concrete technical details, specifications,
+    architecture, capabilities, or implementation facts.
+  - `benchmark`: supports a concrete benchmark, evaluation, measured result,
+    or quantitative performance comparison.
+  - `background`: provides context but is not sufficient by itself to establish
+    the current event.
+  For example, an official release page may use
+  `["event", "event_date", "technical"]`; a benchmark/evaluation page may use
+  `["benchmark", "technical"]`; and general background documentation should
+  use `["background"]`. Do not assign a role unless that specific source
+  supports it. These roles report source coverage; they do not indicate that a
+  separate verifier independently reopened or fact-checked the page.
 
 Never invent or infer release dates, benchmark numbers, specifications, or
 research results. Keep summaries factual and understandable to the stated
