@@ -1,134 +1,145 @@
-# Codex Handoff — AI Weekly Agent v0.2 Phase 4.5
+# Codex Handoff — AI Weekly Agent v0.2 Phase 4.6
 
 ## Task
 
-Integrate the completed v0.2 Verify, client configuration, and telemetry
-components into the real Main/CLI pipeline.
+Perform one controlled full v0.2 end-to-end live CLI validation run.
 
 ## Status
 
-Completed.
+Failed: the required external execution approval timed out before the CLI
+process was created. No live run or project API request occurred.
 
 ## Summary
 
-Main now runs the integrated synchronous pipeline, writes success or truthful
-partial-failure RunRecords from current telemetry, and reports concise
-verification/API usage summaries. Documentation and offline Main integration
-coverage now reflect the implemented behavior. Package metadata remains
-`0.1.0`.
+All pre-run gates passed, but the live command could not start. The initial
+approval request and its one permitted retry both expired during automatic
+permission review with `CreateProcess` not created. Work stopped without using
+another execution route, changing production code, or creating target
+artifacts.
 
-## Integrated Pipeline
+## Live Configuration
 
-Implemented order:
+- Date range: `2026-08-30` through `2026-09-05`, inclusive.
+- Configured model: `gpt-5.6-terra`.
+- Intended invocation override: `OPENAI_MAX_RETRIES=0`.
+- `OPENAI_TIMEOUT_SECONDS`: unset; the SDK default would have been preserved.
+- Overwrite: not requested; no target artifact collision existed.
+- Elapsed time: not applicable because the process never started.
+- API key presence was confirmed without reading or printing its value.
 
-`Research -> save original raw ResearchRun -> Verify -> Curate accepted run ->
-Report -> save Markdown -> construct RunRecord -> best-effort save RunRecord`
+## Pipeline Outcome
 
-## Client Ownership
+- Research: not started.
+- Raw save: not started.
+- Verify: not started.
+- Curate: not started.
+- Report: not started.
+- Markdown save: not started.
+- RunRecord save: not started.
 
-- Main creates exactly one configured base OpenAI client per normal run with
-  `create_openai_client(config)`.
-- Research, Curator, and Report receive separate stage-labelled observed views
-  over that same base client and one shared `TelemetryRecorder`.
-- Verify receives no client and makes no API or network call.
-- Direct standalone calls to Research, Curator, and Report retain their existing
-  fallback client creation.
+## Research Statistics
 
-## Raw Audit Invariant
+Not available because no live Research call occurred.
 
-- The original `ResearchRun` is saved before Verify and is not mutated.
-- Verifier-rejected items remain in raw JSON.
-- Curator receives only `verification_result.accepted_run`.
+## Verification Statistics
 
-## Telemetry and RunRecord Behavior
+Not available because Verify did not run.
 
-- One recorder spans all Research, Curator, and Report calls and is read only
-  when the final success or partial-failure record is constructed.
-- Records represent logical `responses.parse()` calls, including failed calls;
-  SDK-internal HTTP retry attempts remain invisible.
-- Numeric totals are emitted only when usage is complete. Any missing usage
-  makes all token totals null and the CLI prints `Tokens: incomplete telemetry`.
-- Success records include current version, range/timestamps, configured retry
-  and timeout values, API records/totals, original Research counts, Verify
-  counts, curated count, and successful artifact paths.
-- Failures in Research, Verify, Curator, Report, raw save, or report save attempt
-  a partial record with unknown downstream values left null.
-- RunRecords use `data/runs/<start>_to_<end>.json`. Persistence is best-effort,
-  is not retried, cannot invalidate a successful report, and cannot replace the
-  primary pipeline failure.
+## Curator / Report Statistics
 
-## CLI Compatibility
+Not available because Curator and Report did not run.
 
-- Date arguments, `--overwrite`, report naming, report format, and raw JSON
-  format are unchanged.
-- Progress now includes Verify. Successful output adds verification counts,
-  RunRecord path when saved, logical API-call count, and strict token status.
-- The report collision check still occurs before configuration and expensive
-  Research work.
+## Telemetry
+
+No RunRecord exists for the target range. Live logical API calls: `0`.
+Stage distribution, response models, and token usage are not available.
+
+## Artifacts
+
+No artifact was created for `2026-08-30` through `2026-09-05`:
+
+- Raw: `data/raw/2026-08-30_to_2026-09-05.json` — absent.
+- Report: `reports/2026-W36.md` — absent.
+- RunRecord: `data/runs/2026-08-30_to_2026-09-05.json` — absent.
+
+Existing ignored artifacts for other date ranges were not modified.
+
+## v0.1 Compatibility Comparison
+
+| Area | v0.1 expectation | v0.2 live result |
+| --- | --- | --- |
+| Six-category Research | yes | not evaluated |
+| Raw Research saved | yes | not evaluated |
+| Curator call | yes | not evaluated |
+| Report call | yes | not evaluated |
+| Markdown report | yes | not evaluated |
+| Deterministic Verify | no | not evaluated |
+| Evidence filtering | no | not evaluated |
+| API telemetry | no | not evaluated |
+| Token accounting | no | not evaluated |
+| RunRecord | no | not evaluated |
 
 ## Files Changed
 
-- `/home/shanl/ai-weekly-agent/src/ai_weekly_agent/main.py`
-- `/home/shanl/ai-weekly-agent/tests/test_main.py`
-- `/home/shanl/ai-weekly-agent/README.md`
-- `/home/shanl/ai-weekly-agent/AGENTS.md`
 - `/home/shanl/ai-weekly-agent/CODEX_HANDOFF.md`
 
-No stage implementation, prompt, model, configuration, telemetry schema,
-package-version, raw data, report, or committed generated-output file changed.
+No production code, tests, prompts, README, AGENTS guidance, version metadata,
+raw data, reports, or RunRecords were changed.
 
 ## Important Decisions
 
-- Raw persistence remains before deterministic verification.
-- Main uses the existing typed verification result and finding severities; it
-  does not duplicate verifier rules.
-- Artifact paths are populated only after successful saves. The intended
-  RunRecord path is recorded using the Phase 4.4 filename convention.
-- RunRecord failure warnings go to stderr while preserving the primary result.
-- Unexpected programming errors remain unswallowed, matching prior behavior.
+- The two permission timeouts were not counted as live CLI runs because the
+  execution tool reported that process creation never occurred.
+- No unapproved or sandboxed fallback command was attempted after the one
+  allowed approval retry.
+- No Phase 4.6a code change is recommended; no application defect was observed.
 
 ## Commands / Tests Run
 
-- Consulted the official OpenAI Responses API reference for response usage and
-  built-in-tool metadata; this was documentation lookup only.
-- `.venv/bin/python -m pytest tests/test_main.py`
 - `.venv/bin/python -m pytest`
 - `git diff --check`
 - `git status --short`
-- Inspected ignored output directories with `find`, `stat`, and
-  `git status --short --ignored`.
+- `git check-ignore -v .env`
+- Safe configuration-presence inspection via `.venv/bin/python -c ...`; the
+  API key value was neither read nor printed.
+- Target artifact inspection with `find`.
+- Requested twice (initial attempt plus one permitted approval retry), but not
+  started: `/usr/bin/time -p env OPENAI_MAX_RETRIES=0 .venv/bin/python -m
+  ai_weekly_agent.main --start 2026-08-30 --end 2026-09-05`.
 
 ## Test Results
 
-- Focused Main/integration suite: 40 passed.
-- Complete offline suite: 269 passed in 1.07 seconds.
-- Zero live model calls and zero project Research/web-search calls were made.
-- No new generated raw, report, or RunRecord artifact remains in the repository.
+- Pre-run complete offline suite: 269 passed in 0.89 seconds.
+- Pre-run `git diff --check`: passed.
+- `.env` is ignored by `.gitignore`.
+- Pre-run tracked worktree: clean.
+- Post-run suite: not run because no live process started and repository state
+  did not change before this handoff update.
+- Live CLI executions: 0. Live Responses API requests: 0.
 
 ## Known Issues
 
+- Phase 4.6 live validation remains incomplete because external execution
+  approval timed out twice before process creation.
 - Evidence roles remain model-reported classifications.
 - Deterministic Verify cannot semantically prove historical claims on mutable
   product pages.
 - SDK-internal HTTP retry attempts remain invisible to logical-call telemetry.
-- Token usage remains incomplete when a response omits required usage metadata.
+- Token usage can be incomplete when a response omits required usage metadata.
 
 ## Open Questions
 
-None for Phase 4.5.
+- Can the exact controlled CLI command receive explicit external execution and
+  network approval in a subsequent task?
 
 ## Git Status
 
-Expected final state:
+Expected final tracked state:
 
-- modified: `AGENTS.md`
 - modified: `CODEX_HANDOFF.md`
-- modified: `README.md`
-- modified: `src/ai_weekly_agent/main.py`
-- modified: `tests/test_main.py`
 
 ## Recommended Next Step
 
-Perform Phase 4.6: one controlled full v0.2 end-to-end live CLI run for a
-single weekly range, comparing output and telemetry behavior against v0.1
-expectations. Do not begin Phase 4.6 as part of this task.
+Repeat Phase 4.6 after explicit execution/network approval is available. Use
+the same fixed range and one CLI invocation with `OPENAI_MAX_RETRIES=0`. Do not
+begin Phase 4.7 or make a Phase 4.6a code change until live validation runs.
