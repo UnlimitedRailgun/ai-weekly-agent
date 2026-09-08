@@ -1,9 +1,9 @@
-# Codex Handoff — AI Weekly Agent v0.2 Phase 4.4
+# Codex Handoff — AI Weekly Agent v0.2 Phase 4.5
 
 ## Task
 
-Implement v0.2 Phase 4.4: API-call observation, telemetry aggregation, typed
-local RunRecord models, atomic RunRecord persistence, and offline tests.
+Integrate the completed v0.2 Verify, client configuration, and telemetry
+components into the real Main/CLI pipeline.
 
 ## Status
 
@@ -11,123 +11,124 @@ Completed.
 
 ## Summary
 
-Added a standalone telemetry module that creates stage-labelled observed views
-of one existing OpenAI client. Each delegated `responses.parse()` invocation
-records one logical call while preserving the exact response or re-raising the
-original exception. Added strict token aggregation, typed success/partial-failure
-RunRecords, deterministic date-range filenames, and atomic local persistence.
-Telemetry is not wired into Main yet.
+Main now runs the integrated synchronous pipeline, writes success or truthful
+partial-failure RunRecords from current telemetry, and reports concise
+verification/API usage summaries. Documentation and offline Main integration
+coverage now reflect the implemented behavior. Package metadata remains
+`0.1.0`.
+
+## Integrated Pipeline
+
+Implemented order:
+
+`Research -> save original raw ResearchRun -> Verify -> Curate accepted run ->
+Report -> save Markdown -> construct RunRecord -> best-effort save RunRecord`
+
+## Client Ownership
+
+- Main creates exactly one configured base OpenAI client per normal run with
+  `create_openai_client(config)`.
+- Research, Curator, and Report receive separate stage-labelled observed views
+  over that same base client and one shared `TelemetryRecorder`.
+- Verify receives no client and makes no API or network call.
+- Direct standalone calls to Research, Curator, and Report retain their existing
+  fallback client creation.
+
+## Raw Audit Invariant
+
+- The original `ResearchRun` is saved before Verify and is not mutated.
+- Verifier-rejected items remain in raw JSON.
+- Curator receives only `verification_result.accepted_run`.
+
+## Telemetry and RunRecord Behavior
+
+- One recorder spans all Research, Curator, and Report calls and is read only
+  when the final success or partial-failure record is constructed.
+- Records represent logical `responses.parse()` calls, including failed calls;
+  SDK-internal HTTP retry attempts remain invisible.
+- Numeric totals are emitted only when usage is complete. Any missing usage
+  makes all token totals null and the CLI prints `Tokens: incomplete telemetry`.
+- Success records include current version, range/timestamps, configured retry
+  and timeout values, API records/totals, original Research counts, Verify
+  counts, curated count, and successful artifact paths.
+- Failures in Research, Verify, Curator, Report, raw save, or report save attempt
+  a partial record with unknown downstream values left null.
+- RunRecords use `data/runs/<start>_to_<end>.json`. Persistence is best-effort,
+  is not retried, cannot invalidate a successful report, and cannot replace the
+  primary pipeline failure.
+
+## CLI Compatibility
+
+- Date arguments, `--overwrite`, report naming, report format, and raw JSON
+  format are unchanged.
+- Progress now includes Verify. Successful output adds verification counts,
+  RunRecord path when saved, logical API-call count, and strict token status.
+- The report collision check still occurs before configuration and expensive
+  Research work.
 
 ## Files Changed
 
-- `/home/shanl/ai-weekly-agent/.gitignore`
-- `/home/shanl/ai-weekly-agent/src/ai_weekly_agent/telemetry.py` (new)
-- `/home/shanl/ai-weekly-agent/tests/test_telemetry.py` (new)
+- `/home/shanl/ai-weekly-agent/src/ai_weekly_agent/main.py`
+- `/home/shanl/ai-weekly-agent/tests/test_main.py`
+- `/home/shanl/ai-weekly-agent/README.md`
+- `/home/shanl/ai-weekly-agent/AGENTS.md`
 - `/home/shanl/ai-weekly-agent/CODEX_HANDOFF.md`
 
-No Research, Verify, Curator, Report, Main, prompt, configuration, version, or
-generated data file was changed.
+No stage implementation, prompt, model, configuration, telemetry schema,
+package-version, raw data, report, or committed generated-output file changed.
 
 ## Important Decisions
 
-- `observe_openai_client(base_client, recorder, stage)` uses composition, not
-  SDK subclassing. It wraps only the public `responses.parse()` call used by
-  the current stages and delegates other attributes to the underlying objects.
-- Supported API stage labels are `research`, `curate`, and `report`.
-  Verify is intentionally absent because it makes no API call.
-- One wrapper invocation creates one logical `ApiCallRecord`, independent of
-  any SDK-internal HTTP retry attempts.
-- Successful calls return the identical response object. Failed calls record
-  safe metadata and re-raise the identical exception object.
-- Records contain stage, requested model from the existing `model=` keyword,
-  response model, aware UTC timestamps, status, nullable input/output/total
-  tokens, and exception class name on failure.
-- Usage extraction handles mapping- or attribute-style response objects.
-  Missing, partial, malformed, negative, or boolean token values remain `None`;
-  they are never converted to zero.
-- Aggregation is strict. With zero calls, token totals are known zeros and
-  `usage_complete=true`. With calls, completeness requires all three token
-  values on every record. If any required value is missing, all aggregate token
-  totals are `null` and `usage_complete=false`.
-- One `TelemetryRecorder` can be shared by independent research, curate, and
-  report views over the same base client. Records retain synchronous completion
-  order.
-- `RunRecord` uses schema version 1 without changing the package version. It
-  stores caller-supplied application version, DateRange, UTC timestamps, run
-  status/error stage, nullable reliability settings, call records/totals,
-  nullable research/verification/curation counts, and nullable output paths.
-  These nullable fields represent partial failed runs honestly.
-- Telemetry schemas contain no prompt, instructions, input, output body, API
-  key, authorization header, source contents, stack trace, or exception message.
-- Run records use `data/runs/<start>_to_<end>.json`, reusing the established
-  date-range JSON filename format. `data/runs/*.json` is ignored specifically.
-- `save_run_record()` creates the directory, writes and fsyncs a same-directory
-  temporary file, then uses `os.replace`. It cleans up temporary files and
-  propagates `OSError`. Best-effort persistence is an orchestration policy for
-  Phase 4.5; it is not hidden in this low-level function.
+- Raw persistence remains before deterministic verification.
+- Main uses the existing typed verification result and finding severities; it
+  does not duplicate verifier rules.
+- Artifact paths are populated only after successful saves. The intended
+  RunRecord path is recorded using the Phase 4.4 filename convention.
+- RunRecord failure warnings go to stderr while preserving the primary result.
+- Unexpected programming errors remain unswallowed, matching prior behavior.
 
 ## Commands / Tests Run
 
-- Read both identical Phase 4.4 attachments, `AGENTS.md`,
-  `CODEX_HANDOFF.md`, date/persistence helpers, package metadata, and current
-  client usage with `sed`, `cmp`, `diff`, and `rg`.
-- Inspected installed SDK Response/usage fields locally with
-  `.venv/bin/python -c ...`.
-- Consulted the official OpenAI Responses API reference for response usage
-  fields.
-- `.venv/bin/python -m pytest tests/test_telemetry.py` (run twice)
+- Consulted the official OpenAI Responses API reference for response usage and
+  built-in-tool metadata; this was documentation lookup only.
+- `.venv/bin/python -m pytest tests/test_main.py`
 - `.venv/bin/python -m pytest`
 - `git diff --check`
 - `git status --short`
-- Checked modified source/test line lengths with `awk`.
+- Inspected ignored output directories with `find`, `stat`, and
+  `git status --short --ignored`.
 
 ## Test Results
 
-- Focused telemetry tests: 21 passed.
-- Complete offline suite: 257 passed in 1.35 seconds.
-- Zero live OpenAI/model calls and zero project Research/web-search calls were
-  made. The only network activity was official OpenAI documentation lookup.
-
-## Compatibility
-
-- Research production behavior changed: no.
-- Verify production behavior changed: no.
-- Curator production behavior changed: no.
-- Report production behavior changed: no.
-- Main production behavior changed: no.
-- Existing client injection and all prior tests remain functional.
-- No telemetry is automatically attached to fallback or Main-owned clients yet.
+- Focused Main/integration suite: 40 passed.
+- Complete offline suite: 269 passed in 1.07 seconds.
+- Zero live model calls and zero project Research/web-search calls were made.
+- No new generated raw, report, or RunRecord artifact remains in the repository.
 
 ## Known Issues
 
-- SDK-internal HTTP retry attempts remain invisible; records count logical
-  `responses.parse()` invocations only.
-- Telemetry cannot recover token usage the API response does not provide.
-- Telemetry and RunRecord persistence are not yet wired into Main.
-- The stored `api_totals` are supplied from the recorder when constructing a
-  RunRecord; Phase 4.5 must continue using that pairing consistently.
+- Evidence roles remain model-reported classifications.
+- Deterministic Verify cannot semantically prove historical claims on mutable
+  product pages.
+- SDK-internal HTTP retry attempts remain invisible to logical-call telemetry.
+- Token usage remains incomplete when a response omits required usage metadata.
 
 ## Open Questions
 
-None for Phase 4.4.
+None for Phase 4.5.
 
 ## Git Status
 
 Expected final state:
 
-- modified: `.gitignore`
+- modified: `AGENTS.md`
 - modified: `CODEX_HANDOFF.md`
-- untracked: `src/ai_weekly_agent/telemetry.py`
-- untracked: `tests/test_telemetry.py`
-
-No unrelated or generated files are present.
+- modified: `README.md`
+- modified: `src/ai_weekly_agent/main.py`
+- modified: `tests/test_main.py`
 
 ## Recommended Next Step
 
-Implement Phase 4.5 Main integration:
-
-`one configured base OpenAI client -> stage-labelled telemetry views -> Research
--> raw save -> Verify -> Curate -> Report -> report save -> final RunRecord`
-
-Include best-effort RunRecord persistence and documentation updates. Do not
-begin that integration as part of Phase 4.4.
+Perform Phase 4.6: one controlled full v0.2 end-to-end live CLI run for a
+single weekly range, comparing output and telemetry behavior against v0.1
+expectations. Do not begin Phase 4.6 as part of this task.

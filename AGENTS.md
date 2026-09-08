@@ -2,7 +2,7 @@
 
 ## Product Goal and Audience
 
-This repository contains Version 0.1 of an AI & Computer Engineering Weekly Research Agent. Its target reader is a university Computer Engineering student who is relatively new to the AI industry. The agent must produce a reliable, approachable weekly overview without assuming deep industry knowledge, while retaining enough technical detail to be useful.
+This repository contains an AI & Computer Engineering Weekly Research Agent. Its target reader is a university Computer Engineering student who is relatively new to the AI industry. The agent must produce a reliable, approachable weekly overview without assuming deep industry knowledge, while retaining enough technical detail to be useful. The current code integrates the verification and operational-observability work intended for Version 0.2, while package metadata remains at `0.1.0` until release readiness is confirmed.
 
 Each run should research important developments published or announced during the previous seven days in these areas:
 
@@ -15,20 +15,26 @@ Each run should research important developments published or announced during th
 
 Prioritize significance over volume. The report is a curated overview, not an exhaustive news feed.
 
-## Version 0.1 Scope and Pipeline
+## Current Scope and Pipeline
 
 Keep the implementation intentionally simple and use one linear pipeline:
 
-`Research -> Curate -> Report / Explain -> Save locally`
+`Research -> save original raw ResearchRun -> Verify -> Curate -> Report / Explain -> save report -> RunRecord`
 
 The stages have distinct responsibilities:
 
-1. **Research:** Find candidate developments from the defined seven-day window with `web_search` through the OpenAI Responses API. Capture source URLs and enough source metadata to verify every candidate.
-2. **Curate:** Remove duplicates, exclude items outside the time window, and select developments based on relevance, technical importance, source quality, and usefulness to the target reader.
-3. **Report / Explain:** In one non-search Responses API call, explain all selected developments using only supported facts, then render deterministic Markdown with source links close to the claims they support.
-4. **Save locally:** Raw research artifacts belong under `data/raw/`; completed weekly reports belong under `reports/`.
+1. **Research:** Find candidate developments from the defined seven-day window with `web_search` through the OpenAI Responses API. Capture source URLs, evidence-role classifications, and enough source metadata to verify every candidate.
+2. **Raw audit checkpoint:** Persist the original validated `ResearchRun` under `data/raw/` before filtering. Never replace this artifact with verifier output; it must retain items that Verify later rejects.
+3. **Verify:** Apply deterministic, local evidence and structure checks without an API or network call. Produce a separate accepted `ResearchRun`; do not mutate the original. Only accepted items proceed to Curator.
+4. **Curate:** Remove duplicates and select accepted developments based on relevance, technical importance, source quality, and usefulness to the target reader.
+5. **Report / Explain:** In one non-search Responses API call, explain all selected developments using only supported facts, then render deterministic Markdown with source links close to the claims they support.
+6. **Save locally:** Completed weekly reports belong under `reports/`. Operational RunRecords belong under `data/runs/` and summarize stage counts, logical API-call telemetry, reliability settings, outcomes, and artifact paths without storing model content or secrets.
 
-Do not add a database, vector database, RAG system, web UI, Docker setup, email delivery, scheduled jobs, multi-agent framework, or Slack/Discord integration in Version 0.1. Do not introduce abstractions intended only for these out-of-scope features.
+Main must create exactly one configured base OpenAI client per normal run, then inject stage-labelled observed views into Research, Curator, and Report. One telemetry recorder spans the entire run. Direct standalone calls to those stages may retain their fallback client creation. Telemetry records logical `responses.parse()` calls, not hidden SDK HTTP retries. Token totals are complete only when every observed call supplies all required usage values; never substitute zero for missing usage.
+
+RunRecord persistence is best-effort observability. Attempt a success record after the report is saved and a truthful partial record after an in-scope pipeline failure. A RunRecord save error must not invalidate a successful report or replace the primary pipeline error. Use `data/runs/<start>_to_<end>.json`; atomic replacement for the same date range is allowed independently of report `--overwrite` behavior.
+
+Do not add a database, vector database, RAG system, web UI, Docker setup, email delivery, scheduled jobs, multi-agent framework, Slack/Discord integration, additional verification fetching, semantic page fact-checking, cost estimation, retry-attempt transport instrumentation, async pipeline, dashboard, or historical analytics in the current scope. Do not introduce abstractions intended only for these out-of-scope features.
 
 ## Report Content Requirements
 
@@ -59,6 +65,8 @@ Use reputable secondary reporting only when it adds necessary context or when no
 
 Every selected item must retain at least one credible URL. Links must resolve to sources that directly support the associated claims. Analysis may simplify technical material for beginners, but simplification must not change the meaning or certainty of the source.
 
+Source evidence roles are model-reported classifications. Deterministic Verify can enforce their presence and consistency with structured fields, but cannot establish the semantic truth of page content or historical claims on mutable product pages. Keep that limitation explicit and do not treat verification success as independent fact-checking.
+
 ## Technology Requirements
 
 Use:
@@ -74,9 +82,9 @@ Do not substitute the Chat Completions API or an unrelated scraping/search stack
 
 ## Project Structure and Module Organization
 
-Add production modules under `src/ai_weekly_agent/` and mirror that layout under `tests/` (for example, `src/ai_weekly_agent/research.py` and `tests/test_research.py`). Keep research, curation, report explanation, Markdown rendering, and local persistence as separate concerns, without turning them into a framework. Put reusable prompts in `prompts/` and one-off maintenance utilities in `scripts/`.
+Add production modules under `src/ai_weekly_agent/` and mirror that layout under `tests/` (for example, `src/ai_weekly_agent/research.py` and `tests/test_research.py`). Keep research, deterministic verification, curation, report explanation, Markdown rendering, telemetry, and local persistence as separate concerns, without turning them into a framework. Put reusable prompts in `prompts/` and one-off maintenance utilities in `scripts/`.
 
-Raw research should eventually be written under `data/raw/`, and final reports under `reports/`. Code must not assume these directories already exist; the saving stage should create them when needed. Use predictable, date-based filenames and avoid overwriting an existing report silently.
+Raw research is written under `data/raw/`, final reports under `reports/`, and RunRecords under `data/runs/`. Code must not assume these directories already exist; the saving stage should create them when needed. Use predictable, date-based filenames and avoid overwriting an existing report silently.
 
 The `.agents/` and `.codex/` directories are reserved for agent configuration. Treat `.venv/`, caches, generated research/report output, and local credentials as local-only unless the repository explicitly adopts sanitized fixtures or sample reports. Do not commit generated environments or secrets.
 
@@ -94,17 +102,17 @@ Runtime and development dependencies, Python 3.11+ support, packaging metadata, 
 
 Follow PEP 8 with four-space indentation. Use `snake_case` for modules, functions, and variables; `PascalCase` for classes; and `UPPER_SNAKE_CASE` for constants. Add type hints to public functions. Use Pydantic models at boundaries where research candidates, curated items, analyzed items, or configuration need validation.
 
-Prefer small functions, explicit dependency injection, and explicit configuration over module-level state. Keep network access, model interaction, validation, business rules, Markdown rendering, and filesystem persistence separable so each can be tested independently. Avoid premature plugin systems, generalized orchestration layers, and speculative abstractions. If introducing Ruff, Black, or another formatter, commit its configuration and apply it repository-wide.
+Prefer small functions, explicit dependency injection, and explicit configuration over module-level state. Keep network access, model interaction, validation, deterministic verification, business rules, Markdown rendering, telemetry, and filesystem persistence separable so each can be tested independently. Avoid premature plugin systems, generalized orchestration layers, and speculative abstractions. If introducing Ruff, Black, or another formatter, commit its configuration and apply it repository-wide.
 
 ## Testing Guidelines
 
 Use pytest; name files `test_*.py` and tests `test_<behavior>`. Tests must never make real OpenAI API calls or live web requests. Mock or fake the OpenAI client, Responses API results, `web_search` output, and other network boundaries so tests remain deterministic and consume no credentials or quota.
 
-Cover the main pipeline behavior as well as malformed or incomplete model responses, invalid structured data, empty research results, duplicate candidates, dates outside the seven-day window, missing or unsupported citations, retries, external-service failures, and filesystem errors. Test that unverified benchmark/specification claims are rejected or omitted and that reports preserve source URLs. Add a regression test with every bug fix. No coverage threshold is configured yet; new features should exercise their main branches.
+Cover the main pipeline behavior as well as malformed or incomplete model responses, invalid structured data, empty research results, duplicate candidates, dates outside the seven-day window, missing or unsupported citations, retries, external-service failures, partial RunRecords, incomplete usage metadata, and filesystem errors. Test the raw-before-Verify audit invariant, that rejected items do not reach Curator, that unverified benchmark/specification claims are rejected or omitted, and that reports preserve source URLs. Add a regression test with every bug fix. No coverage threshold is configured yet; new features should exercise their main branches.
 
 ## Security and Configuration
 
-Load API keys and other secrets from environment variables or an ignored `.env` file. Commit a sanitized `.env.example` when configuration is introduced. Never commit or log API keys, tokens, full sensitive responses, or user-specific data. Error messages should provide useful context without exposing request credentials or sensitive response bodies.
+Load API keys and other secrets from environment variables or an ignored `.env` file. `OPENAI_MAX_RETRIES` and `OPENAI_TIMEOUT_SECONDS` are optional; preserve SDK defaults when unset and preserve explicit retry zero. Commit a sanitized `.env.example` when configuration is introduced. Never commit or log API keys, prompts, model response bodies, source contents, full sensitive responses, or user-specific data. Error messages and RunRecords should provide useful operational context without exposing request credentials or sensitive response bodies.
 
 ## Commit and Pull Request Guidelines
 
