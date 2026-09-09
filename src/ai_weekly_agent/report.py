@@ -139,7 +139,7 @@ def render_markdown(
 
     if not items:
         lines.append(
-            "No stories passed the Version 0.1 curation threshold for this period."
+            "No stories passed the curation threshold for this period."
         )
         return "\n".join(lines) + "\n"
 

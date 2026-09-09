@@ -91,7 +91,7 @@ def make_api_call(
 def make_run_record(
     *,
     status: str = "success",
-    application_version: str = "0.1.0",
+    application_version: str = "test-version",
     started_at: datetime = STARTED_AT,
     finished_at: datetime = FINISHED_AT,
     error_stage: str | None = None,

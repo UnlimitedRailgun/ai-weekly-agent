@@ -4,7 +4,9 @@ This project produces a beginner-friendly weekly overview of important AI and Co
 
 `Research -> save raw -> Verify -> Curate -> Report / Explain -> save locally`
 
-The package version remains `0.1.0` while the integrated verification and operational-observability work intended for Version 0.2 is tested.
+Version 0.2 adds deterministic evidence verification and operational telemetry
+while preserving the deliberately small Version 0.1 research, curation, and
+reporting workflow.
 
 ## Architecture
 
@@ -13,6 +15,11 @@ Production code lives in `src/ai_weekly_agent/`. The main workflow uses one conf
 Research results are saved under `data/raw/` before verification. This preserves the original audit artifact, including items that Verify later rejects. Sources may carry model-reported evidence roles such as event, event date, technical, benchmark, or background evidence. Verify checks these classifications and other deterministic rules, but it does not fetch pages or independently prove that a source supports a claim. Rejected items do not reach Curator.
 
 Final Markdown reports are stored under `reports/`. A concise operational RunRecord is atomically written to `data/runs/` after success and is attempted after pipeline failures. RunRecord persistence is best-effort: failure to save telemetry cannot invalidate an otherwise successful report or replace the primary pipeline error.
+
+Generated raw Research JSON, RunRecord JSON, and Markdown reports are local
+runtime artifacts and are ignored by Git by default. The RunRecord schema stays
+at version 1 in this release; its `application_version` identifies the producing
+application release separately.
 
 Each run researches these six categories:
 
@@ -102,7 +109,23 @@ Each run researches all six categories sequentially, preserves the original stru
 
 Telemetry counts calls to `responses.parse()` made by the application. It does not expose hidden HTTP retry attempts performed inside the SDK. Missing response usage remains unknown and is never represented as zero. RunRecords contain operational metadata and counts, not prompts, response bodies, API keys, or source contents.
 
+Expected pipeline, persistence, and configuration failures return a nonzero exit
+status with a concise error. The application does not automatically retry a
+failed pipeline stage; any HTTP retries are controlled by the OpenAI SDK and the
+optional `OPENAI_MAX_RETRIES` setting. A partial RunRecord is attempted after an
+in-scope failure without replacing the primary error.
+
 The application does not schedule or automatically trigger weekly runs.
+
+## Limitations
+
+- Verify checks structure, dates, URLs, and model-reported evidence roles
+  locally; it does not reopen sources or independently establish semantic truth.
+- Research is synchronous and processes the six categories sequentially.
+- Telemetry observes application-level Responses API calls, not hidden SDK HTTP
+  retry attempts, and it does not estimate cost.
+- Scheduling, delivery, databases, RAG, a web UI, and historical analytics are
+  intentionally outside the current release.
 
 ## Tests
 

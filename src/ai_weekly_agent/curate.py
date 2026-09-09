@@ -1,4 +1,4 @@
-"""Hybrid deterministic and LLM-assisted curation for Version 0.1."""
+"""Hybrid deterministic and LLM-assisted curation for the weekly agent."""
 
 from collections import Counter
 from collections.abc import Mapping
@@ -124,7 +124,7 @@ def curate_research_run(
 
 
 def calculate_final_score(assessment: CurationAssessment) -> float:
-    """Return the equal-weight mean of the four Version 0.1 dimensions."""
+    """Return the equal-weight mean of the four curation dimensions."""
     return (
         assessment.impact
         + assessment.technical_significance

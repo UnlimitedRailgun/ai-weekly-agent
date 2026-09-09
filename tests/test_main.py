@@ -363,6 +363,7 @@ def test_pipeline_order_data_flow_counts_and_console_output(
     )
 
     output = capsys.readouterr().out
+    assert f"AI Weekly Agent v{main_module.__version__}" in output
     assert "Reporting period: 2026-09-01 -> 2026-09-07" in output
     assert "Research candidates: 2" in output
     assert "Curated stories: 2" in output

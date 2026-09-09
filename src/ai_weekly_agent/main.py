@@ -214,7 +214,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         print("Interrupted by user.", file=sys.stderr)
         return 130
 
-    print("AI Weekly Agent v0.1")
+    print(f"AI Weekly Agent v{__version__}")
     print()
     print(
         "Reporting period: "

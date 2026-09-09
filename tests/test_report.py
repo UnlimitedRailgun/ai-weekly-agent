@@ -159,7 +159,7 @@ def test_empty_curated_list_generates_markdown_without_api_call() -> None:
         client=FakeClient(responses),
     )
 
-    assert "No stories passed the Version 0.1 curation threshold" in markdown
+    assert "No stories passed the curation threshold" in markdown
     assert responses.calls == []
 
 

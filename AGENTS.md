@@ -2,7 +2,7 @@
 
 ## Product Goal and Audience
 
-This repository contains an AI & Computer Engineering Weekly Research Agent. Its target reader is a university Computer Engineering student who is relatively new to the AI industry. The agent must produce a reliable, approachable weekly overview without assuming deep industry knowledge, while retaining enough technical detail to be useful. The current code integrates the verification and operational-observability work intended for Version 0.2, while package metadata remains at `0.1.0` until release readiness is confirmed.
+This repository contains Version 0.2 of an AI & Computer Engineering Weekly Research Agent. Its target reader is a university Computer Engineering student who is relatively new to the AI industry. The agent must produce a reliable, approachable weekly overview without assuming deep industry knowledge, while retaining enough technical detail to be useful. Version 0.2 adds deterministic evidence verification and operational observability while preserving the simple Version 0.1 research, curation, and reporting workflow.
 
 Each run should research important developments published or announced during the previous seven days in these areas:
 

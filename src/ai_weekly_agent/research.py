@@ -116,7 +116,7 @@ def research_all_categories(
     *,
     client: Any | None = None,
 ) -> ResearchRun:
-    """Research all Version 0.1 categories sequentially in fixed order."""
+    """Research all categories sequentially in fixed order."""
     _require_openai_configuration(config)
     api_client = client if client is not None else create_openai_client(config)
     categories = [
