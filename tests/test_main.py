@@ -157,8 +157,14 @@ def make_stages_call_api(
 ) -> None:
     mocks.base_client.responses.parse.side_effect = list(responses)
 
-    def research(*_args: object, client: object) -> ResearchRun:
-        client.responses.parse(model=CONFIG.openai_model)
+    def research(
+        *_args: object,
+        client_for_category: object,
+    ) -> ResearchRun:
+        for category in RESEARCH_CATEGORIES:
+            client_for_category(category).responses.parse(
+                model=CONFIG.openai_model
+            )
         return mocks.run
 
     def curate(*_args: object, client: object) -> list[CuratedItem]:
@@ -186,7 +192,11 @@ def test_default_uses_seven_inclusive_calendar_dates(
 
     assert result == 0
     get_default.assert_called_once_with()
-    mocks.research.assert_called_once_with(DATE_RANGE, CONFIG, client=ANY)
+    mocks.research.assert_called_once_with(
+        DATE_RANGE,
+        CONFIG,
+        client_for_category=ANY,
+    )
 
 
 @pytest.mark.parametrize(
@@ -208,7 +218,11 @@ def test_days_uses_inclusive_relative_date_utility(
 
     assert result == 0
     get_relative.assert_called_once_with(days)
-    mocks.research.assert_called_once_with(expected, CONFIG, client=ANY)
+    mocks.research.assert_called_once_with(
+        expected,
+        CONFIG,
+        client_for_category=ANY,
+    )
 
 
 @pytest.mark.parametrize("days", ["0", "-1"])
@@ -238,7 +252,11 @@ def test_explicit_start_and_end_are_used(
     )
 
     assert result == 0
-    mocks.research.assert_called_once_with(DATE_RANGE, CONFIG, client=ANY)
+    mocks.research.assert_called_once_with(
+        DATE_RANGE,
+        CONFIG,
+        client_for_category=ANY,
+    )
 
 
 @pytest.mark.parametrize(
@@ -279,6 +297,23 @@ def test_invalid_date_string_fails_clearly(
 
     assert result == 2
     assert "expected YYYY-MM-DD" in capsys.readouterr().err
+    mocks.research.assert_not_called()
+
+
+def test_help_exits_successfully_without_loading_config_or_creating_client(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    mocks = install_pipeline(monkeypatch, tmp_path)
+
+    with pytest.raises(SystemExit) as exc_info:
+        main_module.main(["--help"])
+
+    assert exc_info.value.code == 0
+    assert "usage: ai-weekly" in capsys.readouterr().out
+    mocks.load_config.assert_not_called()
+    mocks.create_client.assert_not_called()
     mocks.research.assert_not_called()
 
 
@@ -624,7 +659,7 @@ def test_unexpected_programming_errors_are_not_silently_swallowed(
     mocks.research.assert_called_once()
 
 
-def test_main_creates_one_base_client_and_three_shared_observed_views(
+def test_main_creates_one_base_client_and_eight_shared_observed_views(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -635,33 +670,60 @@ def test_main_creates_one_base_client_and_three_shared_observed_views(
         Mock(return_value=DATE_RANGE),
     )
     real_observe = main_module.observe_openai_client
-    observations: list[tuple[object, object, str, object]] = []
+    observations: list[tuple[object, object, str, str | None, object]] = []
 
     def observe(
         base_client: object,
         recorder: object,
         stage: str,
+        *,
+        research_category: str | None = None,
     ) -> object:
-        view = real_observe(base_client, recorder, stage)
-        observations.append((base_client, recorder, stage, view))
+        view = real_observe(
+            base_client,
+            recorder,
+            stage,
+            research_category=research_category,
+        )
+        observations.append(
+            (base_client, recorder, stage, research_category, view)
+        )
         return view
 
     monkeypatch.setattr(main_module, "observe_openai_client", observe)
+
+    research_views: list[object] = []
+
+    def research(
+        *_args: object,
+        client_for_category: object,
+    ) -> ResearchRun:
+        research_views.extend(
+            client_for_category(category) for category in RESEARCH_CATEGORIES
+        )
+        return mocks.run
+
+    mocks.research.side_effect = research
 
     result = main_module.main([])
 
     assert result == 0
     mocks.create_client.assert_called_once_with(CONFIG)
     assert [entry[2] for entry in observations] == [
-        "research",
+        *("research" for _ in RESEARCH_CATEGORIES),
         "curate",
         "report",
     ]
+    assert [entry[3] for entry in observations] == [
+        *RESEARCH_CATEGORIES,
+        None,
+        None,
+    ]
     assert all(entry[0] is mocks.base_client for entry in observations)
     assert len({id(entry[1]) for entry in observations}) == 1
-    assert mocks.research.call_args.kwargs["client"] is observations[0][3]
-    assert mocks.curate.call_args.kwargs["client"] is observations[1][3]
-    assert mocks.generate.call_args.kwargs["client"] is observations[2][3]
+    assert research_views == [entry[4] for entry in observations[:6]]
+    assert mocks.curate.call_args.kwargs["client"] is observations[6][4]
+    assert mocks.generate.call_args.kwargs["client"] is observations[7][4]
 
 
 def test_original_raw_run_is_saved_before_verify_and_curator_gets_accepted_run(
@@ -764,6 +826,11 @@ def test_success_run_record_contains_current_pipeline_state_and_totals(
     make_stages_call_api(
         mocks,
         api_response(10, 2, 12),
+        api_response(10, 2, 12),
+        api_response(10, 2, 12),
+        api_response(10, 2, 12),
+        api_response(10, 2, 12),
+        api_response(10, 2, 12),
         api_response(20, 3, 23),
         api_response(30, 4, 34),
     )
@@ -780,12 +847,17 @@ def test_success_run_record_contains_current_pipeline_state_and_totals(
     assert run_record.max_retries == 0
     assert run_record.timeout_seconds == 12.5
     assert [record.stage for record in run_record.api_calls] == [
-        "research",
+        *("research" for _ in RESEARCH_CATEGORIES),
         "curate",
         "report",
     ]
-    assert run_record.api_totals.logical_call_count == 3
-    assert run_record.api_totals.total_tokens == 69
+    assert [record.research_category for record in run_record.api_calls] == [
+        *RESEARCH_CATEGORIES,
+        None,
+        None,
+    ]
+    assert run_record.api_totals.logical_call_count == 8
+    assert run_record.api_totals.total_tokens == 129
     assert run_record.api_totals.usage_complete is True
     assert run_record.researched_category_count == 6
     assert run_record.researched_candidate_count == 2
@@ -801,8 +873,8 @@ def test_success_run_record_contains_current_pipeline_state_and_totals(
     )
     output = capsys.readouterr().out
     assert "Verified 2 items: 2 accepted, 0 rejected, 0 warnings." in output
-    assert "API calls: 3" in output
-    assert "Tokens: 69" in output
+    assert "API calls: 8" in output
+    assert "Tokens: 129" in output
 
 
 def test_research_failure_saves_current_failed_telemetry(
@@ -816,13 +888,23 @@ def test_research_failure_saves_current_failed_telemetry(
         Mock(return_value=DATE_RANGE),
     )
     provider_error = RuntimeError("provider failed")
-    mocks.base_client.responses.parse.side_effect = provider_error
+    mocks.base_client.responses.parse.side_effect = [
+        api_response(),
+        api_response(),
+        provider_error,
+    ]
 
-    def fail_research(*_args: object, client: object) -> ResearchRun:
-        try:
-            client.responses.parse(model=CONFIG.openai_model)
-        except RuntimeError as exc:
-            raise ResearchError("research failed") from exc
+    def fail_research(
+        *_args: object,
+        client_for_category: object,
+    ) -> ResearchRun:
+        for category in RESEARCH_CATEGORIES:
+            try:
+                client_for_category(category).responses.parse(
+                    model=CONFIG.openai_model
+                )
+            except RuntimeError as exc:
+                raise ResearchError("research failed") from exc
         raise AssertionError("unreachable")
 
     mocks.research.side_effect = fail_research
@@ -833,8 +915,19 @@ def test_research_failure_saves_current_failed_telemetry(
     run_record = mocks.save_run_record.call_args.args[0]
     assert run_record.status == "failed"
     assert run_record.error_stage == "research"
-    assert [record.stage for record in run_record.api_calls] == ["research"]
-    assert run_record.api_calls[0].status == "failed"
+    assert [record.stage for record in run_record.api_calls] == [
+        "research",
+        "research",
+        "research",
+    ]
+    assert [record.research_category for record in run_record.api_calls] == [
+        *RESEARCH_CATEGORIES[:3]
+    ]
+    assert [record.status for record in run_record.api_calls] == [
+        "success",
+        "success",
+        "failed",
+    ]
     assert run_record.researched_candidate_count is None
     mocks.save_research.assert_not_called()
     mocks.curate.assert_not_called()
@@ -884,12 +977,18 @@ def test_curator_failure_retains_verification_and_current_telemetry(
         Mock(return_value=DATE_RANGE),
     )
     mocks.base_client.responses.parse.side_effect = [
-        api_response(),
+        *(api_response() for _ in RESEARCH_CATEGORIES),
         RuntimeError("provider failed"),
     ]
 
-    def research(*_args: object, client: object) -> ResearchRun:
-        client.responses.parse(model=CONFIG.openai_model)
+    def research(
+        *_args: object,
+        client_for_category: object,
+    ) -> ResearchRun:
+        for category in RESEARCH_CATEGORIES:
+            client_for_category(category).responses.parse(
+                model=CONFIG.openai_model
+            )
         return mocks.run
 
     def fail_curate(*_args: object, client: object) -> list[CuratedItem]:
@@ -907,10 +1006,20 @@ def test_curator_failure_retains_verification_and_current_telemetry(
     assert result == 1
     run_record = mocks.save_run_record.call_args.args[0]
     assert run_record.error_stage == "curate"
+    assert [record.stage for record in run_record.api_calls] == [
+        *("research" for _ in RESEARCH_CATEGORIES),
+        "curate",
+    ]
+    assert [record.research_category for record in run_record.api_calls] == [
+        *RESEARCH_CATEGORIES,
+        None,
+    ]
     assert [record.status for record in run_record.api_calls] == [
-        "success",
+        *("success" for _ in RESEARCH_CATEGORIES),
         "failed",
     ]
+    assert run_record.api_totals.logical_call_count == 7
+    assert run_record.raw_research_path == mocks.raw_path
     assert run_record.verification_accepted_count == 2
     assert run_record.verification_rejected_count == 0
     assert run_record.curated_item_count is None
@@ -928,13 +1037,19 @@ def test_report_failure_retains_prior_summaries_and_failed_call(
         Mock(return_value=DATE_RANGE),
     )
     mocks.base_client.responses.parse.side_effect = [
-        api_response(),
+        *(api_response() for _ in RESEARCH_CATEGORIES),
         api_response(),
         RuntimeError("provider failed"),
     ]
 
-    def research(*_args: object, client: object) -> ResearchRun:
-        client.responses.parse(model=CONFIG.openai_model)
+    def research(
+        *_args: object,
+        client_for_category: object,
+    ) -> ResearchRun:
+        for category in RESEARCH_CATEGORIES:
+            client_for_category(category).responses.parse(
+                model=CONFIG.openai_model
+            )
         return mocks.run
 
     def curate(*_args: object, client: object) -> list[CuratedItem]:
@@ -958,12 +1073,19 @@ def test_report_failure_retains_prior_summaries_and_failed_call(
     run_record = mocks.save_run_record.call_args.args[0]
     assert run_record.error_stage == "report"
     assert [record.stage for record in run_record.api_calls] == [
-        "research",
+        *("research" for _ in RESEARCH_CATEGORIES),
         "curate",
         "report",
     ]
+    assert [record.research_category for record in run_record.api_calls] == [
+        *RESEARCH_CATEGORIES,
+        None,
+        None,
+    ]
+    assert run_record.api_totals.logical_call_count == 8
     assert run_record.api_calls[-1].status == "failed"
     assert run_record.curated_item_count == 2
+    assert run_record.raw_research_path == mocks.raw_path
     assert run_record.report_path is None
     mocks.save_report.assert_not_called()
 
@@ -1006,6 +1128,11 @@ def test_report_save_failure_records_save_stage_without_false_path(
         api_response(),
         api_response(),
         api_response(),
+        api_response(),
+        api_response(),
+        api_response(),
+        api_response(),
+        api_response(),
     )
     mocks.save_report.side_effect = OSError("disk unavailable")
 
@@ -1016,7 +1143,7 @@ def test_report_save_failure_records_save_stage_without_false_path(
     assert run_record.error_stage == "save"
     assert run_record.curated_item_count == 2
     assert run_record.report_path is None
-    assert run_record.api_totals.logical_call_count == 3
+    assert run_record.api_totals.logical_call_count == 8
 
 
 def test_run_record_save_failure_does_not_fail_successful_report(
@@ -1077,6 +1204,11 @@ def test_incomplete_usage_is_null_and_cli_does_not_print_partial_total(
     )
     make_stages_call_api(
         mocks,
+        api_response(10, 2, 12),
+        api_response(10, 2, 12),
+        api_response(10, 2, 12),
+        api_response(10, 2, 12),
+        api_response(10, 2, 12),
         api_response(10, 2, 12),
         api_response(include_usage=False),
         api_response(30, 4, 34),

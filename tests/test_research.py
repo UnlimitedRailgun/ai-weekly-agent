@@ -17,6 +17,7 @@ from ai_weekly_agent.research import (
     research_category,
     save_research_run,
 )
+from ai_weekly_agent.telemetry import TelemetryRecorder, observe_openai_client
 
 
 DATE_RANGE = DateRange(start=date(2026, 8, 30), end=date(2026, 9, 5))
@@ -101,6 +102,7 @@ class FakeResponses:
 class FakeClient:
     def __init__(self, responses: FakeResponses) -> None:
         self.responses = responses
+        self.marker = object()
 
 
 def client_for(
@@ -543,6 +545,86 @@ def test_all_categories_are_assembled_into_research_run() -> None:
     assert [result.category for result in run.categories] == list(
         RESEARCH_CATEGORIES
     )
+
+
+def test_all_categories_receive_explicit_ordered_telemetry_context() -> None:
+    base_client = FakeClient(CategoryResponses())
+    recorder = TelemetryRecorder()
+    observed_clients: list[object] = []
+
+    def client_for_category(category: str) -> object:
+        observed = observe_openai_client(
+            base_client,
+            recorder,
+            "research",
+            research_category=category,
+        )
+        observed_clients.append(observed)
+        return observed
+
+    research_all_categories(
+        DATE_RANGE,
+        configured_app(),
+        client_for_category=client_for_category,
+    )
+
+    assert [record.research_category for record in recorder.records] == list(
+        RESEARCH_CATEGORIES
+    )
+    assert all(client.marker is base_client.marker for client in observed_clients)
+    assert all(
+        "research_category" not in call
+        for call in base_client.responses.calls
+    )
+
+
+def test_failing_category_is_recorded_without_an_extra_logical_call() -> None:
+    failed_index = 2
+
+    class FailingCategoryResponses:
+        def __init__(self) -> None:
+            self.calls: list[dict[str, Any]] = []
+
+        def parse(self, **kwargs: Any) -> dict[str, Any]:
+            index = len(self.calls)
+            self.calls.append(kwargs)
+            if index == failed_index:
+                raise RuntimeError("provider failed")
+            category = RESEARCH_CATEGORIES[index]
+            return response_for(
+                {"category": category, "items": []},
+                web_urls=(),
+            )
+
+    responses = FailingCategoryResponses()
+    base_client = FakeClient(responses)
+    recorder = TelemetryRecorder()
+
+    def client_for_category(category: str) -> object:
+        return observe_openai_client(
+            base_client,
+            recorder,
+            "research",
+            research_category=category,
+        )
+
+    with pytest.raises(
+        ResearchError,
+        match=f"OpenAI research request failed for category: "
+        f"{RESEARCH_CATEGORIES[failed_index]}",
+    ):
+        research_all_categories(
+            DATE_RANGE,
+            configured_app(),
+            client_for_category=client_for_category,
+        )
+
+    assert len(responses.calls) == failed_index + 1
+    assert len(recorder.records) == failed_index + 1
+    assert [record.research_category for record in recorder.records] == list(
+        RESEARCH_CATEGORIES[: failed_index + 1]
+    )
+    assert recorder.records[-1].status == "failed"
 
 
 def empty_research_run() -> ResearchRun:

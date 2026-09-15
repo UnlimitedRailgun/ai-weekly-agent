@@ -1,6 +1,6 @@
 """Research candidates with the Responses API and validate them locally."""
 
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 import os
 from pathlib import Path
 import tempfile
@@ -115,19 +115,31 @@ def research_all_categories(
     config: AppConfig,
     *,
     client: Any | None = None,
+    client_for_category: Callable[[str], Any] | None = None,
 ) -> ResearchRun:
     """Research all categories sequentially in fixed order."""
     _require_openai_configuration(config)
-    api_client = client if client is not None else create_openai_client(config)
-    categories = [
-        research_category(
-            date_range,
-            category,
-            config,
-            client=api_client,
+    shared_client = None
+    if client_for_category is None:
+        shared_client = (
+            client if client is not None else create_openai_client(config)
         )
-        for category in RESEARCH_CATEGORIES
-    ]
+
+    categories: list[CategoryResearchResult] = []
+    for category in RESEARCH_CATEGORIES:
+        category_client = (
+            client_for_category(category)
+            if client_for_category is not None
+            else shared_client
+        )
+        categories.append(
+            research_category(
+                date_range,
+                category,
+                config,
+                client=category_client,
+            )
+        )
     return ResearchRun(date_range=date_range, categories=categories)
 
 

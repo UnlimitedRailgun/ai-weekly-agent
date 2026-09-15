@@ -68,6 +68,7 @@ def sequence_clock(*values: datetime) -> Any:
 def make_api_call(
     *,
     stage: str = "research",
+    research_category: str | None = None,
     input_tokens: int | None = 10,
     output_tokens: int | None = 5,
     total_tokens: int | None = 15,
@@ -76,6 +77,7 @@ def make_api_call(
 ) -> ApiCallRecord:
     return ApiCallRecord(
         stage=stage,
+        research_category=research_category,
         requested_model="requested-model",
         response_model="response-model" if status == "success" else None,
         started_at=STARTED_AT,
@@ -139,6 +141,7 @@ def test_successful_call_is_observed_without_changing_response() -> None:
         base_client,
         recorder,
         "research",
+        research_category="AI model releases",
         clock=sequence_clock(STARTED_AT, FINISHED_AT),
     )
 
@@ -152,6 +155,7 @@ def test_successful_call_is_observed_without_changing_response() -> None:
     assert len(recorder.records) == 1
     record = recorder.records[0]
     assert record.stage == "research"
+    assert record.research_category == "AI model releases"
     assert record.requested_model == "requested-model"
     assert record.response_model == "response-model"
     assert record.status == "success"
@@ -180,6 +184,7 @@ def test_failed_call_is_recorded_and_original_exception_propagates() -> None:
     assert exc_info.value is error
     record = recorder.records[0]
     assert record.stage == "curate"
+    assert record.research_category is None
     assert record.requested_model == "requested-model"
     assert record.response_model is None
     assert record.status == "failed"
@@ -193,6 +198,42 @@ def test_failed_call_is_recorded_and_original_exception_propagates() -> None:
     assert totals.successful_call_count == 0
     assert totals.failed_call_count == 1
     assert totals.usage_complete is False
+
+
+def test_failed_research_call_records_category_without_extra_call() -> None:
+    error = RuntimeError("provider failed")
+    responses = FakeResponses(error)
+    recorder = TelemetryRecorder()
+    observed = observe_openai_client(
+        FakeClient(responses),
+        recorder,
+        "research",
+        research_category="AI research",
+        clock=sequence_clock(STARTED_AT, FINISHED_AT),
+    )
+
+    with pytest.raises(RuntimeError, match="provider failed"):
+        observed.responses.parse(model="requested-model", input="private")
+
+    assert len(responses.calls) == 1
+    assert len(recorder.records) == 1
+    assert recorder.records[0].status == "failed"
+    assert recorder.records[0].research_category == "AI research"
+
+
+@pytest.mark.parametrize("stage", ["curate", "report"])
+def test_non_research_stage_rejects_category(stage: str) -> None:
+    with pytest.raises(
+        ValidationError,
+        match="research_category is only valid for the research stage",
+    ):
+        make_api_call(stage=stage, research_category="AI research")
+
+
+def test_legacy_research_call_may_omit_category() -> None:
+    record = make_api_call(stage="research")
+
+    assert record.research_category is None
 
 
 def test_multiple_stage_views_share_base_client_and_recorder() -> None:
@@ -218,6 +259,11 @@ def test_multiple_stage_views_share_base_client_and_recorder() -> None:
         "research",
         "curate",
         "report",
+    ]
+    assert [record.research_category for record in recorder.records] == [
+        None,
+        None,
+        None,
     ]
     totals = recorder.aggregate()
     assert totals.logical_call_count == 3
@@ -356,7 +402,10 @@ def test_requested_model_is_optional_and_not_inferred_from_arguments() -> None:
 def test_telemetry_does_not_serialize_sensitive_call_content() -> None:
     recorder = TelemetryRecorder()
     observed = observe_openai_client(
-        FakeClient(FakeResponses(response())), recorder, "research"
+        FakeClient(FakeResponses(response())),
+        recorder,
+        "research",
+        research_category="AI model releases",
     )
 
     observed.responses.parse(
@@ -372,6 +421,31 @@ def test_telemetry_does_not_serialize_sensitive_call_content() -> None:
     assert "PRIVATE_INSTRUCTIONS_MARKER" not in serialized
     assert "PRIVATE_TOOL_MARKER" not in serialized
     assert "api_key" not in serialized
+    assert recorder.records[0].research_category == "AI model releases"
+
+
+def test_category_context_does_not_change_request_payload() -> None:
+    responses = FakeResponses(response())
+    recorder = TelemetryRecorder()
+    observed = observe_openai_client(
+        FakeClient(responses),
+        recorder,
+        "research",
+        research_category="AI model releases",
+    )
+
+    observed.responses.parse(model="requested-model", input="private prompt")
+
+    assert responses.calls == [
+        {
+            "args": (),
+            "kwargs": {
+                "model": "requested-model",
+                "input": "private prompt",
+            },
+        }
+    ]
+    assert "research_category" not in responses.calls[0]["kwargs"]
 
 
 def test_observed_timestamps_are_aware_utc_and_ordered() -> None:
@@ -396,7 +470,11 @@ def test_telemetry_models_reject_non_utc_timestamps() -> None:
 
 
 def test_successful_run_record_round_trips_through_json() -> None:
-    run_record = make_run_record(max_retries=0, timeout_seconds=30.5)
+    run_record = make_run_record(
+        max_retries=0,
+        timeout_seconds=30.5,
+        api_calls=[make_api_call(research_category="AI model releases")],
+    )
 
     restored = RunRecord.model_validate_json(run_record.model_dump_json())
 
@@ -404,6 +482,19 @@ def test_successful_run_record_round_trips_through_json() -> None:
     assert restored.status == "success"
     assert restored.researched_category_count == 6
     assert restored.report_path == Path("reports/2026-W36.md")
+    assert restored.api_calls[0].research_category == "AI model releases"
+
+
+def test_old_schema_v1_json_without_research_category_still_parses() -> None:
+    payload = make_run_record().model_dump(mode="json")
+    for call in payload["api_calls"]:
+        call.pop("research_category", None)
+
+    restored = RunRecord.model_validate(payload)
+
+    assert restored.schema_version == 1
+    assert restored.api_calls[0].stage == "research"
+    assert restored.api_calls[0].research_category is None
 
 
 def test_failed_partial_run_record_round_trips_through_json() -> None:

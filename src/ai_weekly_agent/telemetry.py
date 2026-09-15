@@ -30,6 +30,7 @@ class ApiCallRecord(BaseModel):
     """Safe operational metadata for one logical ``responses.parse`` call."""
 
     stage: ApiStage
+    research_category: str | None = Field(default=None, min_length=1)
     requested_model: str | None = None
     response_model: str | None = None
     started_at: AwareDatetime
@@ -49,7 +50,11 @@ class ApiCallRecord(BaseModel):
         return value
 
     @model_validator(mode="after")
-    def validate_timestamp_order(self) -> "ApiCallRecord":
+    def validate_record_context(self) -> "ApiCallRecord":
+        if self.research_category is not None and self.stage != "research":
+            raise ValueError(
+                "research_category is only valid for the research stage"
+            )
         if self.started_at > self.finished_at:
             raise ValueError("started_at must not be after finished_at")
         return self
@@ -178,11 +183,13 @@ class _ObservedResponses:
         responses: Any,
         recorder: TelemetryRecorder,
         stage: ApiStage,
+        research_category: str | None,
         clock: Callable[[], datetime],
     ) -> None:
         self._responses = responses
         self._recorder = recorder
         self._stage = stage
+        self._research_category = research_category
         self._clock = clock
 
     def parse(self, *args: Any, **kwargs: Any) -> Any:
@@ -195,6 +202,7 @@ class _ObservedResponses:
             self._recorder.record(
                 ApiCallRecord(
                     stage=self._stage,
+                    research_category=self._research_category,
                     requested_model=requested_model,
                     started_at=started_at,
                     finished_at=self._clock(),
@@ -208,6 +216,7 @@ class _ObservedResponses:
         self._recorder.record(
             ApiCallRecord(
                 stage=self._stage,
+                research_category=self._research_category,
                 requested_model=requested_model,
                 response_model=_string_value(_value(response, "model")),
                 started_at=started_at,
@@ -230,6 +239,7 @@ class _ObservedOpenAIClient:
         base_client: Any,
         recorder: TelemetryRecorder,
         stage: ApiStage,
+        research_category: str | None,
         clock: Callable[[], datetime],
     ) -> None:
         self._base_client = base_client
@@ -237,6 +247,7 @@ class _ObservedOpenAIClient:
             base_client.responses,
             recorder,
             stage,
+            research_category,
             clock,
         )
 
@@ -249,6 +260,7 @@ def observe_openai_client(
     recorder: TelemetryRecorder,
     stage: ApiStage,
     *,
+    research_category: str | None = None,
     clock: Callable[[], datetime] | None = None,
 ) -> Any:
     """Return a stage-labelled view that delegates to ``base_client``."""
@@ -256,6 +268,7 @@ def observe_openai_client(
         base_client,
         recorder,
         stage,
+        research_category,
         clock or _utc_now,
     )
 

@@ -248,17 +248,20 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     try:
         base_client = create_openai_client(config)
-        research_client = observe_openai_client(
-            base_client, recorder, "research"
-        )
-        curate_client = observe_openai_client(base_client, recorder, "curate")
-        report_client = observe_openai_client(base_client, recorder, "report")
+
+        def client_for_research_category(category: str) -> object:
+            return observe_openai_client(
+                base_client,
+                recorder,
+                "research",
+                research_category=category,
+            )
 
         print("[1/5] Researching AI and Computer Engineering developments...")
         research_run = research_all_categories(
             date_range,
             config,
-            client=research_client,
+            client_for_category=client_for_research_category,
         )
         print(f"Research candidates: {_candidate_count(research_run)}")
 
@@ -285,6 +288,7 @@ def main(argv: Sequence[str] | None = None) -> int:
 
         current_stage = "curate"
         print("[4/5] Curating candidate stories...")
+        curate_client = observe_openai_client(base_client, recorder, "curate")
         curated_items = curate_research_run(
             verification_result.accepted_run,
             config,
@@ -295,6 +299,7 @@ def main(argv: Sequence[str] | None = None) -> int:
 
         current_stage = "report"
         print("[5/5] Generating weekly report...")
+        report_client = observe_openai_client(base_client, recorder, "report")
         markdown = generate_report(
             date_range,
             curated_items,

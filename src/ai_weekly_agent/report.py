@@ -24,6 +24,9 @@ NonEmptyText = Annotated[
 NO_BENCHMARK_INFORMATION = (
     "No reliable benchmark information was available in the researched sources."
 )
+NO_TECHNICAL_DETAILS = (
+    "No additional technical details were available in the researched sources."
+)
 _UNKNOWN_ORGANIZATION = "Unknown / not specified"
 _UNKNOWN_DATE = "Date not reliably established"
 _AUDIENCE = (
@@ -49,23 +52,20 @@ class ReportError(RuntimeError):
 
 
 class StoryExplanation(BaseModel):
-    """LLM-written explanation fields for one supplied story."""
+    """LLM-written interpretation for one supplied story."""
 
-    model_config = ConfigDict(str_strip_whitespace=True)
+    model_config = ConfigDict(str_strip_whitespace=True, extra="forbid")
 
     story_id: NonEmptyText
-    what_happened: NonEmptyText
-    what_is_it: NonEmptyText
+    what_it_is: NonEmptyText
     why_it_matters: NonEmptyText
-    technical_explanation: NonEmptyText
-    benchmark_explanation: NonEmptyText
     student_takeaway: NonEmptyText
 
 
 class ConceptExplanation(BaseModel):
     """One beginner-friendly concept connected to supplied stories."""
 
-    model_config = ConfigDict(str_strip_whitespace=True)
+    model_config = ConfigDict(str_strip_whitespace=True, extra="forbid")
 
     name: NonEmptyText
     explanation: NonEmptyText
@@ -75,7 +75,8 @@ class ConceptExplanation(BaseModel):
 class ReportContent(BaseModel):
     """Structured prose returned by the non-search report request."""
 
-    week_summary: list[NonEmptyText] = Field(default_factory=list, max_length=5)
+    model_config = ConfigDict(extra="forbid")
+
     story_explanations: list[StoryExplanation]
     concepts: list[ConceptExplanation] = Field(default_factory=list, max_length=5)
 
@@ -128,12 +129,24 @@ def render_markdown(
 ) -> str:
     """Render stable Markdown without accepting model-generated metadata."""
     items = list(curated_items)
+    explanations: dict[str, StoryExplanation] = {}
+    story_ids: list[str] = []
+    if items:
+        if content is None:
+            raise ReportError(
+                "Structured report content is required for non-empty input"
+            )
+        story_ids = [
+            f"story_{index:03d}" for index in range(1, len(items) + 1)
+        ]
+        explanations = _validate_report_content(content, story_ids)
+
     lines = [
         "# AI & Computer Engineering Weekly",
         "",
         f"**Week:** {date_range.start.isoformat()} — {date_range.end.isoformat()}",
         "",
-        "## This Week in 60 Seconds",
+        "## This Week at a Glance",
         "",
     ]
 
@@ -143,18 +156,7 @@ def render_markdown(
         )
         return "\n".join(lines) + "\n"
 
-    if content is None:
-        raise ReportError("Structured report content is required for non-empty input")
-
-    story_ids = [f"story_{index:03d}" for index in range(1, len(items) + 1)]
-    explanations = _validate_report_content(content, story_ids)
-
-    if content.week_summary:
-        lines.extend(
-            f"- {_paragraph(summary)}" for summary in content.week_summary
-        )
-    else:
-        lines.append("No concise weekly summary was generated.")
+    lines.extend(_at_a_glance_lines(items))
 
     lines.extend(["", "## Major Updates", ""])
     for index, (story_id, curated_item) in enumerate(
@@ -170,7 +172,7 @@ def render_markdown(
             else _UNKNOWN_DATE
         )
         benchmark_text = (
-            _paragraph(explanation.benchmark_explanation)
+            item.benchmark_information
             if item.benchmark_information is not None
             else NO_BENCHMARK_INFORMATION
         )
@@ -186,19 +188,26 @@ def render_markdown(
                 "",
                 "#### What happened?",
                 "",
-                _paragraph(explanation.what_happened),
+                item.summary,
+                "",
+                "#### Key technical details",
+                "",
+            ]
+        )
+        if item.technical_details:
+            lines.extend(f"- {detail}" for detail in item.technical_details)
+        else:
+            lines.append(NO_TECHNICAL_DETAILS)
+        lines.extend(
+            [
                 "",
                 "#### What is it?",
                 "",
-                _paragraph(explanation.what_is_it),
+                _paragraph(explanation.what_it_is),
                 "",
                 "#### Why does it matter?",
                 "",
                 _paragraph(explanation.why_it_matters),
-                "",
-                "#### Technical details",
-                "",
-                _paragraph(explanation.technical_explanation),
                 "",
                 "#### Performance / benchmarks",
                 "",
@@ -312,25 +321,10 @@ def _render_prompt(
         stories.append(
             {
                 "story_id": f"story_{index:03d}",
-                "curation_score": curated_item.final_score,
                 "title": item.title,
                 "category": item.category,
-                "organization": item.organization,
-                "published_date": (
-                    item.published_date.isoformat()
-                    if item.published_date is not None
-                    else None
-                ),
                 "summary": item.summary,
                 "technical_details": item.technical_details,
-                "benchmark_information": item.benchmark_information,
-                "source_context": [
-                    {
-                        "title": source.title,
-                        "source_type": source.source_type,
-                    }
-                    for source in item.sources
-                ],
             }
         )
 
@@ -394,21 +388,37 @@ def _validate_report_content(
 
 
 def _report_text_values(content: ReportContent) -> list[str]:
-    values = list(content.week_summary)
+    values: list[str] = []
     for explanation in content.story_explanations:
         values.extend(
             [
-                explanation.what_happened,
-                explanation.what_is_it,
+                explanation.what_it_is,
                 explanation.why_it_matters,
-                explanation.technical_explanation,
-                explanation.benchmark_explanation,
                 explanation.student_takeaway,
             ]
         )
     for concept in content.concepts:
         values.extend([concept.name, concept.explanation])
     return values
+
+
+def _at_a_glance_lines(
+    curated_items: Sequence[CuratedItem],
+) -> list[str]:
+    lines = []
+    for curated_item in list(curated_items)[:5]:
+        item = curated_item.item
+        organization = item.organization or _UNKNOWN_ORGANIZATION
+        published_date = (
+            item.published_date.isoformat()
+            if item.published_date is not None
+            else _UNKNOWN_DATE
+        )
+        lines.append(
+            f"- **{published_date} — {_single_line(organization)}:** "
+            f"{_single_line(item.title)}"
+        )
+    return lines
 
 
 def _ordered_sources(sources: Sequence[Source]) -> list[Source]:

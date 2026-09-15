@@ -2,16 +2,21 @@
 
 ## Product Goal and Audience
 
-This repository contains Version 0.2 of an AI & Computer Engineering Weekly Research Agent. Its target reader is a university Computer Engineering student who is relatively new to the AI industry. The agent must produce a reliable, approachable weekly overview without assuming deep industry knowledge, while retaining enough technical detail to be useful. Version 0.2 adds deterministic evidence verification and operational observability while preserving the simple Version 0.1 research, curation, and reporting workflow.
+This repository contains Version 0.3 of an AI & Computer Engineering Weekly
+Research Agent. Its target reader is a university Computer Engineering student
+who is relatively new to the AI industry. The agent must produce a reliable,
+approachable weekly overview without assuming deep industry knowledge, while
+retaining enough technical detail to be useful. Keep the architecture small,
+synchronous, explicit, and easy for a student to understand and debug.
 
 Each run should research important developments published or announced during the previous seven days in these areas:
 
 - AI model releases
-- AI developer tools and frameworks
-- Important AI research
-- GPUs, semiconductors, and AI infrastructure
-- Robotics and physical AI
-- Other important computer engineering developments
+- AI developer tools/frameworks
+- AI research
+- GPU / semiconductor / AI infrastructure
+- robotics / physical AI
+- other important computer engineering developments
 
 Prioritize significance over volume. The report is a curated overview, not an exhaustive news feed.
 
@@ -19,7 +24,7 @@ Prioritize significance over volume. The report is a curated overview, not an ex
 
 Keep the implementation intentionally simple and use one linear pipeline:
 
-`Research -> save original raw ResearchRun -> Verify -> Curate -> Report / Explain -> save report -> RunRecord`
+`Research x6 -> save original raw ResearchRun -> Verify -> Curate -> Grounded Report -> local consistency validation -> deterministic Markdown -> save report -> RunRecord`
 
 The stages have distinct responsibilities:
 
@@ -27,10 +32,20 @@ The stages have distinct responsibilities:
 2. **Raw audit checkpoint:** Persist the original validated `ResearchRun` under `data/raw/` before filtering. Never replace this artifact with verifier output; it must retain items that Verify later rejects.
 3. **Verify:** Apply deterministic, local evidence and structure checks without an API or network call. Produce a separate accepted `ResearchRun`; do not mutate the original. Only accepted items proceed to Curator.
 4. **Curate:** Remove duplicates and select accepted developments based on relevance, technical importance, source quality, and usefulness to the target reader.
-5. **Report / Explain:** In one non-search Responses API call, explain all selected developments using only supported facts, then render deterministic Markdown with source links close to the claims they support.
-6. **Save locally:** Completed weekly reports belong under `reports/`. Operational RunRecords belong under `data/runs/` and summarize stage counts, logical API-call telemetry, reliability settings, outcomes, and artifact paths without storing model content or secrets.
+5. **Grounded Report:** In one non-search Responses API call for a non-empty selection, generate only interpretation and beginner guidance: `story_id`, `what_it_is`, `why_it_matters`, `student_takeaway`, and optional general concept explanations. Empty selections retain the deterministic zero-call report path.
+6. **Consistency and rendering:** Validate story and concept IDs locally, reject model-generated URLs, and render authoritative upstream facts and sources into deterministic Markdown. Do not delegate factual fields back to the Report model.
+7. **Save locally:** Completed weekly reports belong under `reports/`. Operational RunRecords belong under `data/runs/` and summarize stage counts, logical API-call telemetry, reliability settings, outcomes, and artifact paths without storing model content or secrets.
 
-Main must create exactly one configured base OpenAI client per normal run, then inject stage-labelled observed views into Research, Curator, and Report. One telemetry recorder spans the entire run. Direct standalone calls to those stages may retain their fallback client creation. Telemetry records logical `responses.parse()` calls, not hidden SDK HTTP retries. Token totals are complete only when every observed call supplies all required usage values; never substitute zero for missing usage.
+Main must create exactly one configured base OpenAI client per normal run, then
+inject category-aware observed views into the six sequential Research calls and
+stage-labelled observed views into Curator and Report. One telemetry recorder
+spans the entire run. Direct standalone calls to those stages may retain their
+fallback client creation. A normal successful non-empty run has eight logical
+calls: six Research, one Curate, and one Report. Telemetry records logical
+`responses.parse()` calls, not hidden SDK HTTP retries. Research records should
+carry their canonical `research_category`; Curate and Report records must keep
+that field null. Token totals are complete only when every observed call
+supplies all required usage values; never substitute zero for missing usage.
 
 RunRecord persistence is best-effort observability. Attempt a success record after the report is saved and a truthful partial record after an in-scope pipeline failure. A RunRecord save error must not invalidate a successful report or replace the primary pipeline error. Use `data/runs/<start>_to_<end>.json`; atomic replacement for the same date range is allowed independently of report `--overwrite` behavior.
 
@@ -38,7 +53,7 @@ Do not add a database, vector database, RAG system, web UI, Docker setup, email 
 
 ## Report Content Requirements
 
-For every important update, explain:
+For every important update, the final report must explain:
 
 - What happened and when
 - What the product, model, tool, hardware, or research work is
@@ -48,6 +63,19 @@ For every important update, explain:
 - Benchmark or performance information when reliable data exists
 - A beginner-friendly explanation of unfamiliar concepts and practical significance
 - Credible source URLs
+
+Authoritative story identity, order, title, category, organization, published
+date, score, summary, technical details, benchmark information, and source
+metadata belong to the upstream structured data and deterministic renderer. The
+Report model owns only `story_id`, `what_it_is`, `why_it_matters`,
+`student_takeaway`, and optional general concept explanations. Stale factual
+response fields such as `what_happened`, technical or benchmark rewrites, and a
+model-written weekly summary must be rejected rather than rendered.
+
+Local Report validation enforces structural consistency and factual ownership;
+it does not establish the semantic truth of webpage content or arbitrary model
+interpretation. Do not add natural-language date parsing or another Report API
+call to simulate fact-checking.
 
 Do not invent or infer release dates, benchmark numbers, hardware or model specifications, or research results. If reliable information is unavailable, omit the claim or clearly state that it was not independently established. Label company-reported and paper-reported results as such; do not present them as independently verified. Preserve relevant qualifications such as benchmark setup, comparison baseline, hardware, dataset, and evaluation conditions when the source provides them.
 
@@ -100,7 +128,7 @@ Runtime and development dependencies, Python 3.11+ support, packaging metadata, 
 
 ## Coding Style and Design Rules
 
-Follow PEP 8 with four-space indentation. Use `snake_case` for modules, functions, and variables; `PascalCase` for classes; and `UPPER_SNAKE_CASE` for constants. Add type hints to public functions. Use Pydantic models at boundaries where research candidates, curated items, analyzed items, or configuration need validation.
+Follow PEP 8 with four-space indentation. Use `snake_case` for modules, functions, and variables; `PascalCase` for classes; and `UPPER_SNAKE_CASE` for constants. Add type hints to public functions. Use Pydantic models at boundaries where research candidates, curated items, report explanations, telemetry, or configuration need validation.
 
 Prefer small functions, explicit dependency injection, and explicit configuration over module-level state. Keep network access, model interaction, validation, deterministic verification, business rules, Markdown rendering, telemetry, and filesystem persistence separable so each can be tested independently. Avoid premature plugin systems, generalized orchestration layers, and speculative abstractions. If introducing Ruff, Black, or another formatter, commit its configuration and apply it repository-wide.
 
@@ -108,7 +136,7 @@ Prefer small functions, explicit dependency injection, and explicit configuratio
 
 Use pytest; name files `test_*.py` and tests `test_<behavior>`. Tests must never make real OpenAI API calls or live web requests. Mock or fake the OpenAI client, Responses API results, `web_search` output, and other network boundaries so tests remain deterministic and consume no credentials or quota.
 
-Cover the main pipeline behavior as well as malformed or incomplete model responses, invalid structured data, empty research results, duplicate candidates, dates outside the seven-day window, missing or unsupported citations, retries, external-service failures, partial RunRecords, incomplete usage metadata, and filesystem errors. Test the raw-before-Verify audit invariant, that rejected items do not reach Curator, that unverified benchmark/specification claims are rejected or omitted, and that reports preserve source URLs. Add a regression test with every bug fix. No coverage threshold is configured yet; new features should exercise their main branches.
+Cover the main pipeline behavior as well as malformed or incomplete model responses, invalid structured data, empty research results, duplicate candidates, dates outside the seven-day window, missing or unsupported citations, retries, external-service failures, partial RunRecords, incomplete usage metadata, and filesystem errors. Test the raw-before-Verify audit invariant, that rejected items do not reach Curator, that unverified benchmark/specification claims are rejected or omitted, and that reports preserve upstream facts and source URLs. Keep regression coverage for the grounded Report response boundary, ordered Research category telemetry, category identity on failed Research calls, category-null Curate/Report records, the one-base-client invariant, and the eight-call normal pipeline. Add a regression test with every bug fix. No coverage threshold is configured yet; new features should exercise their main branches.
 
 ## Security and Configuration
 

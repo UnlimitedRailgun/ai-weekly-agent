@@ -45,6 +45,8 @@ def make_curated_item(
     category: str = "AI model releases",
     organization: str | None = "Example Lab",
     published_date: date | None = date(2026, 9, 2),
+    summary: str | None = None,
+    technical_details: list[str] | None = None,
     benchmark_information: str | None = None,
     sources: list[Source] | None = None,
     final_score: float = 4.25,
@@ -55,8 +57,12 @@ def make_curated_item(
             category=category,
             organization=organization,
             published_date=published_date,
-            summary=f"Researched summary for {title}.",
-            technical_details=[f"Technical detail for {title}."],
+            summary=summary or f"Researched summary for {title}.",
+            technical_details=(
+                technical_details
+                if technical_details is not None
+                else [f"Technical detail for {title}."]
+            ),
             benchmark_information=benchmark_information,
             sources=sources or [make_source()],
         ),
@@ -67,27 +73,25 @@ def make_curated_item(
 def explanation(
     story_id: str,
     *,
-    benchmark_explanation: str = "The supplied benchmark needs context.",
-    what_happened: str | None = None,
+    what_it_is: str | None = None,
+    why_it_matters: str | None = None,
+    student_takeaway: str | None = None,
 ) -> dict[str, Any]:
     return {
         "story_id": story_id,
-        "what_happened": what_happened or f"What happened for {story_id}.",
-        "what_is_it": f"What it is for {story_id}.",
-        "why_it_matters": f"Why it matters for {story_id}.",
-        "technical_explanation": f"Technical explanation for {story_id}.",
-        "benchmark_explanation": benchmark_explanation,
-        "student_takeaway": f"Student takeaway for {story_id}.",
+        "what_it_is": what_it_is or f"What it is for {story_id}.",
+        "why_it_matters": why_it_matters or f"Why it matters for {story_id}.",
+        "student_takeaway": (
+            student_takeaway or f"Student takeaway for {story_id}."
+        ),
     }
 
 
 def report_payload(
     *explanations: dict[str, Any],
-    summaries: list[str] | None = None,
     concepts: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     return {
-        "week_summary": summaries if summaries is not None else ["Weekly summary."],
         "story_explanations": list(explanations),
         "concepts": concepts if concepts is not None else [],
     }
@@ -137,13 +141,11 @@ def generate_with(
 
 def parsed_content(
     *explanations: dict[str, Any],
-    summaries: list[str] | None = None,
     concepts: list[dict[str, Any]] | None = None,
 ) -> ReportContent:
     return ReportContent.model_validate(
         report_payload(
             *explanations,
-            summaries=summaries,
             concepts=concepts,
         )
     )
@@ -167,6 +169,7 @@ def test_empty_report_includes_date_range() -> None:
     markdown = render_markdown(DATE_RANGE, [])
 
     assert "**Week:** 2026-08-30 — 2026-09-05" in markdown
+    assert "## This Week at a Glance" in markdown
     assert "## Major Updates" not in markdown
 
 
@@ -226,6 +229,57 @@ def test_one_story_uses_the_same_llm_flow() -> None:
     assert len(client.responses.calls) == 1
 
 
+def test_story_explanation_contains_only_interpretive_fields() -> None:
+    assert set(StoryExplanation.model_fields) == {
+        "story_id",
+        "what_it_is",
+        "why_it_matters",
+        "student_takeaway",
+    }
+
+
+def test_report_content_contains_no_model_written_weekly_summary() -> None:
+    assert set(ReportContent.model_fields) == {
+        "story_explanations",
+        "concepts",
+    }
+
+    stale = report_payload(explanation("story_001"))
+    stale["week_summary"] = ["A model-written factual recap."]
+
+    with pytest.raises(ReportError, match="Invalid structured report response"):
+        generate_with([make_curated_item()], stale)
+
+
+def test_v02_date_restatement_field_is_forbidden() -> None:
+    item = make_curated_item(published_date=date(2026, 8, 31))
+    stale = explanation("story_001")
+    stale["what_happened"] = "On September 1, 2026, the product launched."
+
+    with pytest.raises(ReportError, match="Invalid structured report response"):
+        generate_with([item], report_payload(stale))
+
+
+@pytest.mark.parametrize(
+    "field",
+    [
+        "title",
+        "organization",
+        "published_date",
+        "category",
+        "sources",
+        "benchmark_explanation",
+        "technical_explanation",
+    ],
+)
+def test_stale_authoritative_response_fields_are_forbidden(field: str) -> None:
+    stale = explanation("story_001")
+    stale[field] = "model-owned value"
+
+    with pytest.raises(ReportError, match="Invalid structured report response"):
+        generate_with([make_curated_item()], report_payload(stale))
+
+
 def test_report_request_has_no_tools_or_web_search() -> None:
     _, client = generate_with(
         [make_curated_item()],
@@ -237,9 +291,10 @@ def test_report_request_has_no_tools_or_web_search() -> None:
     assert "tool_choice" not in call
     assert "web_search" not in call["input"]
     assert "Do not browse, search, call tools" in call["input"]
+    assert "Do not restate" in call["input"]
 
 
-def test_report_prompt_contains_supplied_story_facts() -> None:
+def test_report_prompt_contains_context_needed_for_explanation() -> None:
     item = make_curated_item(
         "Specific accelerator",
         benchmark_information="Company-reported latency was 12 ms.",
@@ -255,9 +310,31 @@ def test_report_prompt_contains_supplied_story_facts() -> None:
     assert "Specific accelerator" in prompt
     assert "Researched summary for Specific accelerator." in prompt
     assert "Technical detail for Specific accelerator." in prompt
-    assert "Company-reported latency was 12 ms." in prompt
-    assert "Specific source" in prompt
-    assert '"source_type": "benchmark"' in prompt
+
+
+def test_report_prompt_omits_metadata_the_model_must_not_restate() -> None:
+    item = make_curated_item(
+        "Specific accelerator",
+        organization="Specific Lab",
+        published_date=date(2026, 8, 31),
+        benchmark_information="Company-reported latency was 12 ms.",
+        sources=[make_source("Specific source", source_type="benchmark")],
+    )
+
+    _, client = generate_with(
+        [item],
+        report_payload(explanation("story_001")),
+    )
+
+    prompt = client.responses.calls[0]["input"]
+    assert '"organization"' not in prompt
+    assert '"published_date"' not in prompt
+    assert '"curation_score"' not in prompt
+    assert '"benchmark_information"' not in prompt
+    assert '"source_context"' not in prompt
+    assert "Specific Lab" not in prompt
+    assert "Company-reported latency was 12 ms." not in prompt
+    assert "Specific source" not in prompt
 
 
 def test_source_urls_are_not_sent_to_the_model() -> None:
@@ -295,8 +372,8 @@ def test_structured_explanations_map_by_id_but_render_in_story_order() -> None:
     markdown, _ = generate_with(
         [first, second],
         report_payload(
-            explanation("story_002", what_happened="Second explanation."),
-            explanation("story_001", what_happened="First explanation."),
+            explanation("story_002", what_it_is="Second explanation."),
+            explanation("story_001", what_it_is="First explanation."),
         ),
     )
 
@@ -391,6 +468,36 @@ def test_category_and_organization_are_rendered() -> None:
     assert "**Organization:** Robotics Lab" in markdown
 
 
+def test_what_happened_is_exact_upstream_summary() -> None:
+    summary = "Upstream summary with authoritative wording and  two spaces."
+    item = make_curated_item(summary=summary)
+
+    markdown, _ = generate_with(
+        [item],
+        report_payload(explanation("story_001")),
+    )
+
+    what_happened = markdown.split("#### What happened?\n\n", 1)[1].split(
+        "\n\n#### Key technical details", 1
+    )[0]
+    assert what_happened == summary
+
+
+def test_technical_details_are_exact_and_deterministically_ordered() -> None:
+    details = ["First exact detail.", "Second exact detail."]
+    item = make_curated_item(technical_details=details)
+
+    markdown, _ = generate_with(
+        [item],
+        report_payload(explanation("story_001")),
+    )
+
+    section = markdown.split("#### Key technical details\n\n", 1)[1].split(
+        "\n\n#### What is it?", 1
+    )[0]
+    assert section == "- First exact detail.\n- Second exact detail."
+
+
 def test_missing_organization_renders_neutral_text() -> None:
     markdown, _ = generate_with(
         [make_curated_item(organization=None)],
@@ -418,6 +525,49 @@ def test_null_published_date_does_not_fabricate_a_date() -> None:
     assert "**Date:** Date not reliably established" in markdown
 
 
+@pytest.mark.parametrize("story_count", [1, 4, 5, 7])
+def test_at_a_glance_uses_at_most_first_five_curated_stories(
+    story_count: int,
+) -> None:
+    items = [
+        make_curated_item(
+            f"Story {index}",
+            organization=f"Lab {index}",
+            published_date=date(2026, 9, min(index, 5)),
+        )
+        for index in range(1, story_count + 1)
+    ]
+    content = parsed_content(
+        *(explanation(f"story_{index:03d}") for index in range(1, story_count + 1))
+    )
+
+    markdown = render_markdown(DATE_RANGE, items, content)
+    glance = markdown.split("## This Week at a Glance\n\n", 1)[1].split(
+        "\n\n## Major Updates", 1
+    )[0]
+    lines = glance.splitlines()
+
+    assert len(lines) == min(story_count, 5)
+    assert lines == [
+        f"- **2026-09-{min(index, 5):02d} — Lab {index}:** Story {index}"
+        for index in range(1, min(story_count, 5) + 1)
+    ]
+    if story_count > 5:
+        assert "Story 6" not in glance
+
+
+def test_at_a_glance_uses_unknown_value_fallbacks() -> None:
+    item = make_curated_item(organization=None, published_date=None)
+    content = parsed_content(explanation("story_001"))
+
+    markdown = render_markdown(DATE_RANGE, [item], content)
+
+    assert (
+        "- **Date not reliably established — Unknown / not specified:** "
+        "Example release"
+    ) in markdown
+
+
 def test_curation_score_has_deterministic_format() -> None:
     markdown, _ = generate_with(
         [make_curated_item(final_score=4.2)],
@@ -427,39 +577,26 @@ def test_curation_score_has_deterministic_format() -> None:
     assert "**Curation Score:** 4.20 / 5" in markdown
 
 
-def test_known_benchmark_uses_structured_explanation() -> None:
+def test_known_benchmark_uses_exact_upstream_information() -> None:
     item = make_curated_item(
         benchmark_information="Paper-reported throughput was 120 tokens/s."
     )
 
     markdown, _ = generate_with(
         [item],
-        report_payload(
-            explanation(
-                "story_001",
-                benchmark_explanation=(
-                    "The paper-reported result depends on its test setup."
-                ),
-            )
-        ),
+        report_payload(explanation("story_001")),
     )
 
-    assert "The paper-reported result depends on its test setup." in markdown
+    assert "Paper-reported throughput was 120 tokens/s." in markdown
 
 
 def test_null_benchmark_always_uses_explicit_safe_text() -> None:
     markdown, _ = generate_with(
         [make_curated_item(benchmark_information=None)],
-        report_payload(
-            explanation(
-                "story_001",
-                benchmark_explanation="Unsupported performance claim.",
-            )
-        ),
+        report_payload(explanation("story_001")),
     )
 
     assert NO_BENCHMARK_INFORMATION in markdown
-    assert "Unsupported performance claim." not in markdown
 
 
 def test_source_urls_come_from_news_item_sources() -> None:
@@ -480,7 +617,7 @@ def test_source_urls_come_from_news_item_sources() -> None:
 def test_model_generated_url_is_rejected_before_rendering() -> None:
     malicious = explanation(
         "story_001",
-        what_happened="Use https://unvalidated.example as a replacement source.",
+        what_it_is="Use https://unvalidated.example as a replacement source.",
     )
 
     with pytest.raises(ReportError, match="must not contain URLs"):
@@ -593,15 +730,6 @@ def test_empty_concept_output_is_valid() -> None:
     assert "## Source Index" in markdown
 
 
-def test_empty_summary_output_is_valid() -> None:
-    markdown, _ = generate_with(
-        [make_curated_item()],
-        report_payload(explanation("story_001"), summaries=[]),
-    )
-
-    assert "No concise weekly summary was generated." in markdown
-
-
 def test_api_exception_becomes_clear_report_error() -> None:
     responses = FakeResponses(error=RuntimeError("provider unavailable"))
 
@@ -635,7 +763,7 @@ def test_missing_structured_output_fails_clearly() -> None:
 
 def test_invalid_structured_output_fails_clearly() -> None:
     with pytest.raises(ReportError, match="Invalid structured report response"):
-        generate_with([make_curated_item()], {"week_summary": []})
+        generate_with([make_curated_item()], {"concepts": []})
 
 
 def test_save_report_uses_iso_week_filename_and_creates_directory(
@@ -695,7 +823,6 @@ def test_report_generation_never_uses_web_search() -> None:
 
 def test_report_content_accepts_small_concept_output() -> None:
     content = ReportContent(
-        week_summary=["One story this week."],
         story_explanations=[StoryExplanation(**explanation("story_001"))],
         concepts=[
             ConceptExplanation(

@@ -1,34 +1,81 @@
 # AI & Computer Engineering Weekly Research Agent
 
-This project produces a beginner-friendly weekly overview of important AI and Computer Engineering developments for university students. Its current integrated workflow is deliberately small and synchronous:
+This project produces a beginner-friendly weekly overview of important AI and
+Computer Engineering developments for university students. Version 0.3 is
+deliberately small, synchronous, and local-first, with grounded report output
+and per-category Research telemetry.
 
-`Research -> save raw -> Verify -> Curate -> Report / Explain -> save locally`
-
-Version 0.2 adds deterministic evidence verification and operational telemetry
-while preserving the deliberately small Version 0.1 research, curation, and
-reporting workflow.
+```text
+Research ×6
+-> save original raw ResearchRun
+-> Verify
+-> Curate
+-> Grounded Report
+-> local consistency validation
+-> deterministic Markdown
+-> RunRecord
+```
 
 ## Architecture
 
-Production code lives in `src/ai_weekly_agent/`. The main workflow uses one configured OpenAI client, with stage-labelled views for Research, Curator, and Report so one telemetry recorder can observe their logical Responses API calls. Verify is deterministic local Python and makes no API call.
+Production code lives in `src/ai_weekly_agent/`. A normal run creates one
+configured OpenAI client. Lightweight observed views label the six Research
+categories, Curate, and Report while sharing one telemetry recorder. Verify and
+report consistency validation are deterministic local Python and make no API
+calls.
 
 Research results are saved under `data/raw/` before verification. This preserves the original audit artifact, including items that Verify later rejects. Sources may carry model-reported evidence roles such as event, event date, technical, benchmark, or background evidence. Verify checks these classifications and other deterministic rules, but it does not fetch pages or independently prove that a source supports a claim. Rejected items do not reach Curator.
 
-Final Markdown reports are stored under `reports/`. A concise operational RunRecord is atomically written to `data/runs/` after success and is attempted after pipeline failures. RunRecord persistence is best-effort: failure to save telemetry cannot invalidate an otherwise successful report or replace the primary pipeline error.
+### Grounded reporting
+
+The Report model writes only interpretation and student-focused explanation:
+what the development is, why it matters, what the student should learn, and
+optional general concept explanations. Authoritative structured facts—including
+story order, title, organization, date, summary, technical details, benchmark
+information, and sources—remain owned by the upstream data and are rendered
+deterministically.
+
+Before Markdown rendering, local consistency checks require exactly one
+explanation for every selected story, reject unknown or duplicate story IDs,
+validate concept references, and reject model-generated URLs. Keeping factual
+fields out of the Report response reduces Report-stage factual drift. It does
+not independently fact-check the semantic content of source webpages.
+
+### Persistence and telemetry
+
+Final Markdown reports are stored under `reports/`. A concise operational
+RunRecord is atomically written to `data/runs/` after success and is attempted
+after pipeline failures. RunRecord persistence is best-effort: failure to save
+telemetry cannot invalidate an otherwise successful report or replace the
+primary pipeline error.
+
+RunRecords contain logical call stage, status, supported error metadata, token
+usage, and Research category identity when the category-aware Research path is
+used. A normal successful non-empty run is expected to use eight logical
+Responses API calls:
+
+```text
+6 Research + 1 Curate + 1 Report = 8 logical API calls
+```
+
+This describes application-level `responses.parse()` calls, not hidden HTTP
+retry attempts inside the OpenAI SDK. A failure can end the run with fewer
+logical calls. Missing usage values remain unknown rather than being replaced
+with zero.
 
 Generated raw Research JSON, RunRecord JSON, and Markdown reports are local
 runtime artifacts and are ignored by Git by default. The RunRecord schema stays
 at version 1 in this release; its `application_version` identifies the producing
 application release separately.
 
-Each run researches these six categories:
+Each run researches these six canonical categories:
 
 - AI model releases
-- AI developer tools and frameworks
-- Important AI research
-- GPUs, semiconductors, and AI infrastructure
-- Robotics and physical AI
-- Other important computer engineering developments
+- AI developer tools/frameworks
+- AI research
+- GPU / semiconductor / AI infrastructure
+- robotics / physical AI
+- other important computer engineering developments
 
 The current scope does not include a database, RAG, a vector database, a web UI, a scheduler, Docker, delivery integrations, or a multi-agent framework.
 
@@ -105,9 +152,16 @@ Final reports are protected from silent replacement. To replace an existing repo
 ai-weekly --overwrite
 ```
 
-Each run researches all six categories sequentially, preserves the original structured research, verifies evidence metadata locally, curates accepted stories, and writes one Markdown report. CLI completion output includes the logical API-call count and either a complete total-token count or an explicit `incomplete telemetry` message.
+Each run researches all six categories sequentially, preserves the original
+structured research, verifies evidence metadata locally, curates accepted
+stories, obtains grounded explanations in one non-search Report call, validates
+the response locally, and writes one Markdown report. An empty curated result
+uses the existing deterministic empty report and makes no Report call. CLI
+completion output includes the logical API-call count and either a complete
+total-token count or an explicit `incomplete telemetry` message.
 
-Telemetry counts calls to `responses.parse()` made by the application. It does not expose hidden HTTP retry attempts performed inside the SDK. Missing response usage remains unknown and is never represented as zero. RunRecords contain operational metadata and counts, not prompts, response bodies, API keys, or source contents.
+RunRecords contain operational metadata and counts, not prompts, response
+bodies, API keys, request bodies, or source contents.
 
 Expected pipeline, persistence, and configuration failures return a nonzero exit
 status with a concise error. The application does not automatically retry a
@@ -121,11 +175,16 @@ The application does not schedule or automatically trigger weekly runs.
 
 - Verify checks structure, dates, URLs, and model-reported evidence roles
   locally; it does not reopen sources or independently establish semantic truth.
+- Research facts remain model-reported and evidence-covered rather than
+  independently verified against webpage meaning.
+- Report interpretations and beginner explanations can still be imperfect even
+  though authoritative factual fields are rendered from upstream data.
 - Research is synchronous and processes the six categories sequentially.
 - Telemetry observes application-level Responses API calls, not hidden SDK HTTP
   retry attempts, and it does not estimate cost.
-- Scheduling, delivery, databases, RAG, a web UI, and historical analytics are
-  intentionally outside the current release.
+- Reports and telemetry are local files. There is no scheduler or automatic
+  delivery.
+- Databases, RAG, a web UI, and historical analytics remain out of scope.
 
 ## Tests
 
