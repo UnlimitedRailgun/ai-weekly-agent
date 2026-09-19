@@ -1,7 +1,7 @@
 """Pydantic models shared by the application pipeline."""
 
 from datetime import date
-from typing import Literal, Self
+from typing import Annotated, Literal, Self
 
 from pydantic import (
     BaseModel,
@@ -10,6 +10,12 @@ from pydantic import (
     field_validator,
     model_validator,
 )
+
+
+PRIMARY_EVIDENCE_SOURCE_TYPES = frozenset(
+    {"official", "paper", "github", "university"}
+)
+ORIGINAL_EVALUATION_SOURCE_TYPES = PRIMARY_EVIDENCE_SOURCE_TYPES | {"benchmark"}
 
 
 EvidenceRole = Literal[
@@ -34,6 +40,9 @@ VerificationCode = Literal[
     "technical_evidence_missing",
     "source_url_normalized",
     "duplicate_source_removed",
+    "legacy_fact_support",
+    "provenance_metadata_missing",
+    "fact_support_inconsistent",
 ]
 
 
@@ -51,6 +60,24 @@ class DateRange(BaseModel):
         return self
 
 
+class FactSupport(BaseModel):
+    """Model-reported coverage of facts in one containing news item."""
+
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    summary: bool
+    technical_detail_indices: list[Annotated[int, Field(ge=0)]]
+    benchmark: bool
+
+    @field_validator("technical_detail_indices")
+    @classmethod
+    def validate_unique_indices(cls, indices: list[int]) -> list[int]:
+        """Keep zero-based detail references unambiguous."""
+        if len(indices) != len(set(indices)):
+            raise ValueError("technical_detail_indices must not contain duplicates")
+        return indices
+
+
 class Source(BaseModel):
     """A source associated directly with one news item."""
 
@@ -60,6 +87,7 @@ class Source(BaseModel):
     url: str = Field(min_length=1)
     source_type: str = Field(min_length=1)
     evidence_roles: list[EvidenceRole] | None = None
+    fact_support: FactSupport | None = None
 
     @field_validator("evidence_roles")
     @classmethod

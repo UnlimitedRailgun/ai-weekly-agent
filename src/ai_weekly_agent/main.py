@@ -143,7 +143,18 @@ def _build_run_record(
     curated_item_count: int | None,
     raw_research_path: Path | None,
     report_path: Path | None,
-) -> RunRecord:
+) -> RunRecord | None:
+    finished_at = _utc_now()
+    if finished_at < started_at:
+        # Keep wall-clock evidence truthful: do not clamp an inverted sample or
+        # let best-effort observability invalidate the primary pipeline outcome.
+        print(
+            "Warning: Could not save run telemetry: UTC clock moved backwards "
+            f"({started_at.isoformat()} -> {finished_at.isoformat()}); "
+            "RunRecord not written.",
+            file=sys.stderr,
+        )
+        return None
     findings = (
         verification_result.findings if verification_result is not None else []
     )
@@ -151,7 +162,7 @@ def _build_run_record(
         application_version=__version__,
         date_range=date_range,
         started_at=started_at,
-        finished_at=_utc_now(),
+        finished_at=finished_at,
         status=status,
         error_stage=error_stage,
         max_retries=config.openai_max_retries,
@@ -191,7 +202,9 @@ def _build_run_record(
     )
 
 
-def _save_run_record_best_effort(run_record: RunRecord) -> Path | None:
+def _save_run_record_best_effort(run_record: RunRecord | None) -> Path | None:
+    if run_record is None:
+        return None
     try:
         return save_run_record(run_record, output_dir=RUNS_DIR)
     except OSError as exc:
@@ -273,7 +286,9 @@ def main(argv: Sequence[str] | None = None) -> int:
 
         current_stage = "verify"
         print("[3/5] Verifying research evidence...")
-        verification_result = verify_research_run(research_run)
+        verification_result = verify_research_run(
+            research_run, require_provenance=True,
+        )
         accepted_count = _candidate_count(verification_result.accepted_run)
         rejected_count = len(verification_result.rejected_item_ids)
         warning_count = sum(
@@ -374,7 +389,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         print("Run telemetry saved:")
         print(run_record_path)
 
-    totals = success_record.api_totals
+    totals = recorder.aggregate()
     print(f"API calls: {totals.logical_call_count}")
     if totals.usage_complete:
         print(f"Tokens: {totals.total_tokens}")

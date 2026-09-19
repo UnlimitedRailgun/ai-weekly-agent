@@ -18,6 +18,7 @@ from ai_weekly_agent.research import (
     save_research_run,
 )
 from ai_weekly_agent.telemetry import TelemetryRecorder, observe_openai_client
+from ai_weekly_agent.verify import verify_research_run
 
 
 DATE_RANGE = DateRange(start=date(2026, 8, 30), end=date(2026, 9, 5))
@@ -667,3 +668,141 @@ def test_failed_atomic_replace_does_not_corrupt_existing_raw_file(
 
     assert target.read_text(encoding="utf-8") == "existing valid research\n"
     assert list(tmp_path.glob("*.tmp")) == []
+
+
+def test_research_prompt_requests_complete_fact_support(research_prompt: str) -> None:
+    for text in (
+        "Include non-null `fact_support` for every retained source",
+        "this item's factual event summary",
+        "distinct zero-based positions",
+        "0 is the first detail",
+        "true requires an `event` role",
+        "each index requires a `technical` role",
+        "true requires a `benchmark` role",
+        "Background-only sources use summary=false, benchmark=false, and no indices",
+    ):
+        assert text in research_prompt
+
+
+def test_research_prompt_requests_per_fact_primary_or_original_evidence(
+    research_prompt: str,
+) -> None:
+    for text in (
+        "summary and every supplied technical detail need explicit retained",
+        "A known `published_date` also needs such a source with `event_date` evidence",
+        "Place the direct primary/original event announcement first",
+        "Omit unsupported technical details",
+        "otherwise leave it null",
+        "Reserve `benchmark` for an original evaluation report",
+        "cannot substitute for primary event/date or product-specification evidence",
+        "Secondary reporting may corroborate but must not be the only evidence",
+        "do not collect unnecessary extra sources",
+        "do not independently prove webpage semantics",
+    ):
+        assert text in research_prompt
+
+
+def fact_support_payload(
+    *, summary: bool = True, indices: list[int] | None = None,
+    benchmark: bool = False,
+) -> dict[str, Any]:
+    return {
+        "summary": summary,
+        "technical_detail_indices": [0] if indices is None else indices,
+        "benchmark": benchmark,
+    }
+
+
+def complete_run_with(result: CategoryResearchResult) -> ResearchRun:
+    return ResearchRun(
+        date_range=DATE_RANGE,
+        categories=[
+            result
+            if category == CATEGORY
+            else CategoryResearchResult(category=category)
+            for category in RESEARCH_CATEGORIES
+        ],
+    )
+
+
+def test_research_preserves_fact_support_through_normalization_and_raw_save(
+    tmp_path: Path,
+) -> None:
+    item = candidate(source_urls=("https://EXAMPLE.com/release/#launch",))
+    source = item["sources"][0]
+    source["evidence_roles"] = ["event", "event_date", "technical"]
+    source["fact_support"] = fact_support_payload()
+    client = client_for(single_result(item))
+
+    result = research_category(DATE_RANGE, CATEGORY, configured_app(), client=client)
+    run = complete_run_with(result)
+    saved_path = save_research_run(run, output_dir=tmp_path)
+    restored = ResearchRun.model_validate_json(saved_path.read_text(encoding="utf-8"))
+
+    assert restored == run
+    assert result.items[0].sources[0].url == VALID_URL
+    support = result.items[0].sources[0].fact_support
+    assert support is not None
+    assert support.model_dump() == fact_support_payload()
+    assert verify_research_run(run, require_provenance=True).rejected_item_ids == []
+    assert len(client.responses.calls) == 1
+
+
+@pytest.mark.parametrize(
+    "discarded_kind",
+    ["searching", "in_progress", "failed", "unsupported", "invalid", "duplicate"],
+)
+def test_discarded_research_source_cannot_supply_any_fact_coverage(
+    discarded_kind: str,
+) -> None:
+    removed_url = {
+        "invalid": "not-a-url",
+        "duplicate": "https://EXAMPLE.com/release/#launch",
+    }.get(discarded_kind, "https://example.com/discarded")
+    item = candidate(
+        benchmark_information="Company-reported throughput was 100 tokens/s.",
+        source_urls=(VALID_URL, removed_url),
+    )
+    item["sources"][0].update(
+        evidence_roles=["event_date"],
+        fact_support=fact_support_payload(summary=False, indices=[]),
+    )
+    item["sources"][1].update(
+        evidence_roles=["event", "event_date", "technical", "benchmark"],
+        fact_support=fact_support_payload(benchmark=True),
+    )
+    response = response_for(single_result(item))
+    if discarded_kind in {"searching", "in_progress", "failed"}:
+        response["output"].append(
+            {
+                "type": "web_search_call", "status": discarded_kind,
+                "action": {"sources": [{"url": removed_url}]},
+            }
+        )
+    client = FakeClient(FakeResponses(response))
+
+    result = research_category(DATE_RANGE, CATEGORY, configured_app(), client=client)
+    verification = verify_research_run(
+        complete_run_with(result), require_provenance=True
+    )
+
+    assert len(result.items) == 1
+    assert len(result.items[0].sources) == 1
+    assert result.items[0].sources[0].fact_support.summary is False
+    assert verification.rejected_item_ids == ["category_01:item_001"]
+    assert {
+        "event_evidence_missing", "technical_evidence_missing",
+        "benchmark_evidence_missing",
+    } <= {finding.code for finding in verification.findings}
+    assert len(client.responses.calls) == 1
+
+
+def test_malformed_fact_support_fails_research_without_retry() -> None:
+    item = candidate()
+    item["sources"][0]["fact_support"] = fact_support_payload(indices=[True])
+    client = client_for(single_result(item))
+
+    with pytest.raises(research_module.ResearchError, match="Invalid structured"):
+        research_category(DATE_RANGE, CATEGORY, configured_app(), client=client)
+
+    assert len(client.responses.calls) == 1

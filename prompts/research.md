@@ -87,8 +87,31 @@ For each item:
   `["event", "event_date", "technical"]`; a benchmark/evaluation page may use
   `["benchmark", "technical"]`; and general background documentation should
   use `["background"]`. Do not assign a role unless that specific source
-  supports it. These roles report source coverage; they do not indicate that a
-  separate verifier independently reopened or fact-checked the page.
+  supports it.
+- Include non-null `fact_support` for every retained source:
+  - `summary`: true only for support of this item's factual event summary;
+    true requires an `event` role.
+  - `technical_detail_indices`: distinct zero-based positions in this item's
+    `technical_details` (0 is the first detail); each index requires a
+    `technical` role and must refer to an existing detail.
+  - `benchmark`: true only when `benchmark_information` is present and this
+    source supports it; true requires a `benchmark` role.
+  Background-only sources use summary=false, benchmark=false, and no indices.
+- The summary and every supplied technical detail need explicit retained
+  primary/original support: `official`, `paper`, `github`, or `university`.
+  A known `published_date` also needs such a source with `event_date` evidence.
+  Omit unsupported technical details. Benchmark text needs original evaluation
+  support from these types or `benchmark`; otherwise leave it null. Reserve
+  `benchmark` for an original evaluation report, not repeated secondary scores;
+  it cannot substitute for primary event/date or product-specification evidence.
+- Place the direct primary/original event announcement first when available.
+  Secondary reporting may corroborate but must not be the only evidence for
+  fresh authoritative facts. Keep one entry per source URL; do not collect
+  unnecessary extra sources to populate metadata.
+
+Source classifications, evidence roles, and FactSupport are reported metadata;
+they do not independently prove webpage semantics or indicate that a separate
+verifier reopened or fact-checked the page.
 
 Never invent or infer release dates, benchmark numbers, specifications, or
 research results. Keep summaries factual and understandable to the stated

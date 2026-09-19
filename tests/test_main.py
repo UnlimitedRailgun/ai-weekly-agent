@@ -1,5 +1,5 @@
 import json
-from datetime import date
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import ANY, Mock, call
@@ -7,12 +7,16 @@ from unittest.mock import ANY, Mock, call
 import pytest
 
 import ai_weekly_agent.main as main_module
+import ai_weekly_agent.curate as curate_module
+import ai_weekly_agent.report as report_module
+import ai_weekly_agent.research as research_module
 from ai_weekly_agent.config import AppConfig
 from ai_weekly_agent.curate import CuratorError
 from ai_weekly_agent.models import (
     CategoryResearchResult,
     CuratedItem,
     DateRange,
+    FactSupport,
     NewsItem,
     ResearchRun,
     Source,
@@ -24,7 +28,7 @@ from ai_weekly_agent.research import (
     save_research_run as persist_research_run,
 )
 from ai_weekly_agent.telemetry import RunRecord
-from ai_weekly_agent.verify import VerificationError
+from ai_weekly_agent.verify import VerificationError, verify_research_run
 
 
 DATE_RANGE = DateRange(start=date(2026, 9, 1), end=date(2026, 9, 7))
@@ -46,6 +50,9 @@ def make_item(number: int) -> NewsItem:
                 url=f"https://example.com/story-{number}",
                 source_type="official",
                 evidence_roles=["event", "event_date", "technical"],
+                fact_support=FactSupport(
+                    summary=True, technical_detail_indices=[0], benchmark=False,
+                ),
             )
         ],
     )
@@ -334,9 +341,9 @@ def test_pipeline_order_data_flow_counts_and_console_output(
     monkeypatch.setattr(
         main_module,
         "verify_research_run",
-        lambda research_run: (
+        lambda research_run, **kwargs: (
             events("verify"),
-            real_verify(research_run),
+            real_verify(research_run, **kwargs),
         )[1],
     )
     mocks.curate.side_effect = (
@@ -766,9 +773,9 @@ def test_original_raw_run_is_saved_before_verify_and_curator_gets_accepted_run(
         events.append("save raw")
         return persist_research_run(run, output_dir=output_dir)
 
-    def verify(run: ResearchRun) -> object:
+    def verify(run: ResearchRun, **kwargs: object) -> object:
         events.append("verify")
-        return real_verify(run)
+        return real_verify(run, **kwargs)
 
     def curate(
         run: ResearchRun,
@@ -801,7 +808,7 @@ def test_original_raw_run_is_saved_before_verify_and_curator_gets_accepted_run(
     run_record = mocks.save_run_record.call_args.args[0]
     assert run_record.verification_accepted_count == 1
     assert run_record.verification_rejected_count == 1
-    assert run_record.verification_warning_count == 1
+    assert run_record.verification_warning_count == 1  # Unknown date only.
     assert run_record.verification_information_count == 1
 
 
@@ -1233,3 +1240,632 @@ def _titles(research_run: ResearchRun) -> list[str]:
         for category in research_run.categories
         for item in category.items
     ]
+
+
+def curation_assessment(
+    candidate_id: str, *, duplicate_of: str | None = None, score: int = 4,
+) -> dict:
+    return {
+        "candidate_id": candidate_id,
+        "impact": score,
+        "technical_significance": score,
+        "novelty": score,
+        "student_relevance": score,
+        "semantic_duplicate_of": duplicate_of,
+    }
+
+
+def report_content() -> dict:
+    return {
+        "story_explanations": [{
+            "story_id": "story_001",
+            "what_it_is": "A student-friendly explanation of the development.",
+            "why_it_matters": "It illustrates an important engineering tradeoff.",
+            "student_takeaway": "Learn the underlying system design concepts.",
+        }],
+        "concepts": [{
+            "name": "Engineering tradeoffs",
+            "explanation": "Compare system properties under stated conditions.",
+            "related_story_ids": ["story_001"],
+        }],
+    }
+
+
+def category_run(*items: NewsItem) -> ResearchRun:
+    run = make_research_run()
+    for item in items:
+        index = RESEARCH_CATEGORIES.index(item.category)
+        run.categories[index].items.append(item)
+    return run
+
+
+def install_responses_pipeline(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    run: ResearchRun,
+    *,
+    assessments: list[dict] | None = None,
+    content: dict | None = None,
+    config: AppConfig = CONFIG,
+) -> SimpleNamespace:
+    """Keep real stages/persistence; fake only config and Responses transport."""
+    responses: list[object] = []
+    for group in run.categories:
+        response = api_response()
+        response.output_parsed = group.model_dump(mode="json")
+        response.output = [{
+            "type": "web_search_call",
+            "status": "completed",
+            "action": {"sources": [
+                {"url": source.url}
+                for item in group.items for source in item.sources
+            ]},
+        }]
+        responses.append(response)
+    for output in (
+        {"assessments": assessments if assessments is not None else [
+            curation_assessment("candidate_001")
+        ]},
+        content if content is not None else report_content(),
+    ):
+        response = api_response()
+        response.output_parsed = output
+        responses.append(response)
+    parse = Mock(side_effect=responses)
+    base_client = SimpleNamespace(responses=SimpleNamespace(parse=parse))
+    factory = Mock(return_value=base_client)
+    observe = Mock(wraps=main_module.observe_openai_client)
+    verify = Mock(wraps=main_module.verify_research_run)
+    curate = Mock(wraps=main_module.curate_research_run)
+    generate = Mock(wraps=main_module.generate_report)
+    save_raw = Mock(wraps=main_module.save_research_run)
+    monkeypatch.setattr(main_module, "RAW_DATA_DIR", tmp_path / "raw")
+    monkeypatch.setattr(main_module, "REPORTS_DIR", tmp_path / "reports")
+    monkeypatch.setattr(main_module, "RUNS_DIR", tmp_path / "runs")
+    monkeypatch.setattr(main_module, "load_config", Mock(return_value=config))
+    monkeypatch.setattr(main_module, "create_openai_client", factory)
+    monkeypatch.setattr(main_module, "observe_openai_client", observe)
+    monkeypatch.setattr(main_module, "verify_research_run", verify)
+    monkeypatch.setattr(main_module, "curate_research_run", curate)
+    monkeypatch.setattr(main_module, "generate_report", generate)
+    monkeypatch.setattr(main_module, "save_research_run", save_raw)
+    # A stage fallback would violate the shared-client invariant and could make
+    # a live request. Fail immediately if any stage attempts it.
+    for module in (research_module, curate_module, report_module):
+        monkeypatch.setattr(module, "create_openai_client", Mock(
+            side_effect=AssertionError("stage must use injected fake client")
+        ))
+    return SimpleNamespace(
+        parse=parse, responses=responses, factory=factory, base_client=base_client,
+        observe=observe, verify=verify, curate=curate, generate=generate,
+        save_raw=save_raw,
+    )
+
+
+def run_fresh_main() -> int:
+    return main_module.main(["--start", "2026-09-01", "--end", "2026-09-07"])
+
+
+def saved_record(tmp_path: Path) -> RunRecord:
+    path = tmp_path / "runs" / "2026-09-01_to_2026-09-07.json"
+    return RunRecord.model_validate_json(path.read_text(encoding="utf-8"))
+
+
+def saved_raw(tmp_path: Path) -> ResearchRun:
+    path = tmp_path / "raw" / "2026-09-01_to_2026-09-07.json"
+    return ResearchRun.model_validate_json(path.read_text(encoding="utf-8"))
+
+
+def test_real_fresh_pipeline_requires_provenance_and_preserves_eight_call_budget(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    item = make_item(1)
+    item.benchmark_information = "Company-reported: 10 units on a stated setup."
+    item.sources[0].evidence_roles.append("benchmark")
+    item.sources[0].fact_support.benchmark = True
+    item.sources.append(Source(
+        title="Current background", url="https://example.com/context",
+        source_type="official", evidence_roles=["background"],
+        fact_support=FactSupport(
+            summary=False, technical_detail_indices=[], benchmark=False,
+        ),
+    ))
+    run = make_research_run(item)
+    snapshot = run.model_dump(mode="json")
+    config = AppConfig(
+        openai_api_key="test-key", openai_model="test-model",
+        openai_max_retries=0, openai_timeout_seconds=12.5,
+    )
+    mocks = install_responses_pipeline(monkeypatch, tmp_path, run, config=config)
+
+    assert run_fresh_main() == 0
+
+    checkpoint = mocks.verify.call_args.args[0]
+    mocks.verify.assert_called_once_with(checkpoint, require_provenance=True)
+    assert checkpoint.model_dump(mode="json") == snapshot
+    assert saved_raw(tmp_path).model_dump(mode="json") == snapshot
+    assert run.model_dump(mode="json") == snapshot
+    assert _titles(mocks.curate.call_args.args[0]) == [item.title]
+    selected = mocks.generate.call_args.args[1]
+    assert selected[0].item.model_dump(mode="json") == item.model_dump(mode="json")
+    mocks.factory.assert_called_once_with(config)
+    views = mocks.observe.call_args_list
+    assert len(views) == 8
+    assert all(view.args[0] is mocks.base_client for view in views)
+    assert len({id(view.args[1]) for view in views}) == 1
+    assert [view.args[2] for view in views] == ["research"] * 6 + ["curate", "report"]
+    calls = mocks.parse.call_args_list
+    assert len(calls) == 8
+    for call_ in calls[:6]:
+        assert call_.kwargs["tools"] == [{"type": "web_search"}]
+        assert call_.kwargs["max_tool_calls"] == 4
+        assert call_.kwargs["text_format"] is CategoryResearchResult
+    assert all("tools" not in call_.kwargs for call_ in calls[6:])
+    assert calls[6].kwargs["text_format"].__name__ == "_CurationResponse"
+    assert all(call_.kwargs["model"] == config.openai_model for call_ in calls)
+    report_prompt = calls[7].kwargs["input"]
+    assert "fact_support" not in report_prompt
+    assert "evidence_roles" not in report_prompt
+    assert calls[7].kwargs["text_format"] is report_module.ReportContent
+    record = saved_record(tmp_path)
+    assert record.schema_version == 1
+    assert record.application_version == main_module.__version__ == "0.4.0"
+    assert record.status == "success" and record.error_stage is None
+    assert record.max_retries == 0 and record.timeout_seconds == 12.5
+    assert record.researched_category_count == 6
+    assert record.researched_candidate_count == record.verification_accepted_count == 1
+    assert record.verification_rejected_count == record.verification_warning_count == 0
+    assert record.curated_item_count == 1
+    assert [entry.research_category for entry in record.api_calls] == [
+        *RESEARCH_CATEGORIES, None, None,
+    ]
+    assert all(entry.status == "success" for entry in record.api_calls)
+    assert record.api_totals.logical_call_count == 8
+    assert record.api_totals.usage_complete is True
+    assert record.api_totals.input_tokens == 80
+    assert record.api_totals.output_tokens == 40
+    assert record.api_totals.total_tokens == 120
+    assert record.raw_research_path.is_file() and record.report_path.is_file()
+    markdown = record.report_path.read_text(encoding="utf-8")
+    for fact in (
+        item.title, item.organization, item.published_date.isoformat(), item.summary,
+        item.technical_details[0], item.benchmark_information,
+        *(source.url for source in item.sources),
+    ):
+        assert fact in markdown
+    assert "## This Week at a Glance" in markdown
+    assert (
+        f"- **{item.published_date.isoformat()} — {item.organization}:** {item.title}"
+        in markdown
+    )
+    assert "fact_support" not in markdown
+
+
+@pytest.mark.parametrize(
+    "failure",
+    ["legacy", "partial", "background", "summary", "date", "detail", "benchmark"],
+)
+def test_real_fresh_pipeline_rejects_unsupported_item_but_preserves_raw(
+    failure: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    accepted, rejected = make_item(1), make_item(2)
+    source = rejected.sources[0]
+    if failure == "legacy":
+        source.fact_support = None
+    elif failure in {"partial", "background"}:
+        rejected.sources.append(Source(
+            title="Legacy context", url="https://example.com/context",
+            source_type="secondary", evidence_roles=["background"],
+        ))
+        if failure == "partial":
+            rejected.sources[-1].evidence_roles = ["event"]
+    elif failure == "summary":
+        source.fact_support.summary = False
+    elif failure == "date":
+        source.evidence_roles.remove("event_date")
+    elif failure == "detail":
+        source.fact_support.technical_detail_indices = []
+    elif failure == "benchmark":
+        rejected.benchmark_information = "Unsupported benchmark text."
+        source.evidence_roles.append("benchmark")  # Role alone is insufficient.
+    run = make_research_run(accepted, rejected)
+    snapshot = run.model_dump(mode="json")
+    mocks = install_responses_pipeline(monkeypatch, tmp_path, run)
+
+    assert run_fresh_main() == 0
+
+    assert saved_raw(tmp_path).model_dump(mode="json") == snapshot
+    assert run.model_dump(mode="json") == snapshot
+    assert _titles(mocks.curate.call_args.args[0]) == [accepted.title]
+    selected_titles = [item.item.title for item in mocks.generate.call_args.args[1]]
+    assert selected_titles == [accepted.title]
+    record = saved_record(tmp_path)
+    assert record.researched_candidate_count == 2
+    assert record.verification_accepted_count == record.verification_rejected_count == 1
+    assert record.curated_item_count == 1
+    assert record.status == "success"
+    assert record.api_totals.logical_call_count == mocks.parse.call_count == 8
+    assert record.verification_warning_count == 0
+    assert rejected.title not in record.report_path.read_text(encoding="utf-8")
+
+
+def test_real_pipeline_cross_category_dedup_preserves_verify_count_and_winner(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    first, winner = make_item(1), make_item(2)
+    first.title = "Qualcomm Amazon announcement"
+    first.organization = "Qualcomm Technologies and Amazon"
+    winner.title = "Qualcomm AWS custom silicon collaboration"
+    winner.category = RESEARCH_CATEGORIES[3]
+    winner.organization = "Qualcomm Technologies and Amazon Web Services"
+    winner.published_date = first.published_date
+    winner.sources[0].url = first.sources[0].url
+    winner.sources.append(Source(
+        title="Winner specification", url="https://example.com/specification",
+        source_type="official", evidence_roles=["technical"],
+        fact_support=FactSupport(
+            summary=False, technical_detail_indices=[0], benchmark=False,
+        ),
+    ))
+    run = category_run(first, winner)
+    snapshot = run.model_dump(mode="json")
+    mocks = install_responses_pipeline(
+        monkeypatch, tmp_path, run,
+        assessments=[curation_assessment("candidate_002")],
+    )
+
+    assert run_fresh_main() == 0
+
+    assert saved_raw(tmp_path).model_dump(mode="json") == snapshot
+    assert _titles(mocks.curate.call_args.args[0]) == [first.title, winner.title]
+    prompt = mocks.parse.call_args_list[6].kwargs["input"]
+    assert '"candidate_id": "candidate_001"' not in prompt
+    assert '"candidate_id": "candidate_002"' in prompt
+    selected = mocks.generate.call_args.args[1]
+    assert len(selected) == 1
+    assert selected[0].item.model_dump(mode="json") == winner.model_dump(mode="json")
+    assert run.model_dump(mode="json") == snapshot
+    record = saved_record(tmp_path)
+    assert record.researched_candidate_count == record.verification_accepted_count == 2
+    assert record.verification_rejected_count == 0
+    assert record.curated_item_count == 1
+    assert record.api_totals.logical_call_count == mocks.parse.call_count == 8
+    assert "dedup" not in record.model_dump_json()
+    markdown = record.report_path.read_text(encoding="utf-8")
+    assert first.title not in markdown and first.summary not in markdown
+    assert first.sources[0].title not in markdown
+    for value in (
+        winner.title, winner.organization, winner.summary,
+        winner.technical_details[0], winner.sources[-1].url,
+    ):
+        assert value in markdown
+
+
+def test_real_pipeline_unresolved_exact_duplicates_use_one_semantic_assessment(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    first, second = make_item(1), make_item(2)
+    second.published_date = first.published_date
+    # Different URLs/titles survive local identity; the one model call identifies
+    # semantic equivalence, and the higher-scoring complete record wins.
+    mocks = install_responses_pipeline(
+        monkeypatch, tmp_path, make_research_run(first, second),
+        assessments=[
+            curation_assessment("candidate_001", duplicate_of="candidate_002"),
+            curation_assessment("candidate_002", score=5),
+        ],
+    )
+
+    assert run_fresh_main() == 0
+
+    prompt = mocks.parse.call_args_list[6].kwargs["input"]
+    for candidate_id in ("candidate_001", "candidate_002"):
+        assert f'"candidate_id": "{candidate_id}"' in prompt
+    selected = mocks.generate.call_args.args[1]
+    assert len(selected) == 1 and selected[0].item == second
+    assert selected[0].final_score == 5
+    record = saved_record(tmp_path)
+    assert record.verification_accepted_count == 2
+    assert record.curated_item_count == 1
+    assert record.api_totals.logical_call_count == mocks.parse.call_count == 8
+
+
+@pytest.mark.parametrize("legacy_shape", ["v0.1", "v0.2", "v0.3"])
+def test_legacy_json_standalone_compatibility_remains_but_fresh_main_is_strict(
+    legacy_shape: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    payload = make_research_run(make_item(1)).model_dump(mode="json")
+    source = payload["categories"][0]["items"][0]["sources"][0]
+    source.pop("fact_support")
+    if legacy_shape == "v0.1":
+        source.pop("evidence_roles")
+    elif legacy_shape == "v0.2":
+        source["fact_support"] = None  # Explicit null also parses compatibly.
+    old_json = json.dumps(payload)
+    old_run = ResearchRun.model_validate_json(old_json)
+    snapshot = old_run.model_dump(mode="json")
+    historical_result = verify_research_run(old_run)
+    assert _titles(historical_result.accepted_run) == ["Story 1"]
+    assert any(
+        finding.code == "legacy_fact_support"
+        for finding in historical_result.findings
+    )
+    mocks = install_responses_pipeline(monkeypatch, tmp_path, old_run)
+
+    assert run_fresh_main() == 0
+
+    assert saved_raw(tmp_path).model_dump(mode="json") == snapshot
+    assert old_run.model_dump(mode="json") == snapshot
+    assert _titles(mocks.curate.call_args.args[0]) == []
+    assert mocks.generate.call_args.args[1] == []
+    assert mocks.verify.call_args.kwargs == {"require_provenance": True}
+    record = saved_record(tmp_path)
+    assert record.status == "success" and record.error_stage is None
+    assert record.researched_candidate_count == record.verification_rejected_count == 1
+    assert record.verification_accepted_count == record.curated_item_count == 0
+    assert record.api_totals.logical_call_count == mocks.parse.call_count == 6
+    assert [entry.research_category for entry in record.api_calls] == list(
+        RESEARCH_CATEGORIES
+    )
+    assert record.verification_warning_count == 0  # No compatibility fallback.
+    assert "No stories passed" in record.report_path.read_text(encoding="utf-8")
+    assert record.raw_research_path.is_file()
+
+
+@pytest.mark.parametrize(
+    "empty_kind", ["no_research", "all_rejected", "below_threshold"],
+)
+def test_real_empty_pipeline_counts_are_truthful_without_report_request(
+    empty_kind: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    item = make_item(1)
+    run = (
+        make_research_run() if empty_kind == "no_research"
+        else make_research_run(item)
+    )
+    if empty_kind == "all_rejected":
+        item.sources[0].fact_support.summary = False
+    mocks = install_responses_pipeline(
+        monkeypatch, tmp_path, run,
+        assessments=[curation_assessment("candidate_001", score=3)],
+    )
+
+    assert run_fresh_main() == 0
+
+    record = saved_record(tmp_path)
+    expected_calls = 7 if empty_kind == "below_threshold" else 6
+    assert record.api_totals.logical_call_count == expected_calls
+    assert mocks.parse.call_count == expected_calls
+    assert record.researched_candidate_count == (
+        0 if empty_kind == "no_research" else 1
+    )
+    assert record.verification_accepted_count == (
+        1 if empty_kind == "below_threshold" else 0
+    )
+    assert record.verification_rejected_count == (
+        1 if empty_kind == "all_rejected" else 0
+    )
+    assert record.curated_item_count == 0
+    assert mocks.generate.call_args.args[1] == []
+    assert all(entry.stage != "report" for entry in record.api_calls)
+    assert record.schema_version == 1 and record.status == "success"
+    assert record.api_totals.usage_complete is True
+    assert record.api_totals.total_tokens == 15 * expected_calls
+    assert saved_raw(tmp_path) == run
+    assert record.raw_research_path.is_file() and record.report_path.is_file()
+    assert "No stories passed" in record.report_path.read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize("missing_index", [0, 6, 7])
+def test_real_pipeline_missing_usage_never_becomes_zero_or_partial_total(
+    missing_index: int, monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    mocks = install_responses_pipeline(
+        monkeypatch, tmp_path, make_research_run(make_item(1)),
+    )
+    mocks.responses[missing_index].usage = None
+
+    assert run_fresh_main() == 0
+
+    record = saved_record(tmp_path)
+    assert record.api_totals.logical_call_count == mocks.parse.call_count == 8
+    assert record.api_totals.usage_complete is False
+    assert record.api_totals.input_tokens is None
+    assert record.api_totals.output_tokens is None
+    assert record.api_totals.total_tokens is None
+    assert record.api_calls[missing_index].total_tokens is None
+    assert all(
+        entry.total_tokens == 15
+        for index, entry in enumerate(record.api_calls) if index != missing_index
+    )
+    assert "Tokens: incomplete telemetry" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize(
+    ("failure", "expected_stage", "call_count", "accepted", "curated"),
+    [
+        ("research", "research", 3, None, None),
+        ("raw_save", "save", 6, None, None),
+        ("curate", "curate", 7, 1, None),
+        ("report", "report", 8, 1, 1),
+        ("report_save", "save", 8, 1, 1),
+    ],
+)
+def test_real_strict_pipeline_failures_preserve_partial_paths_counts_and_calls(
+    failure: str, expected_stage: str, call_count: int,
+    accepted: int | None, curated: int | None,
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    mocks = install_responses_pipeline(
+        monkeypatch, tmp_path, make_research_run(make_item(1)),
+    )
+    failure_index = {"research": 2, "curate": 6, "report": 7}.get(failure)
+    if failure_index is not None:
+        mocks.responses[failure_index] = RuntimeError("fake provider failure")
+        mocks.parse.side_effect = mocks.responses
+    elif failure == "raw_save":
+        mocks.save_raw.side_effect = OSError("fake raw disk failure")
+    else:
+        monkeypatch.setattr(main_module, "save_report", Mock(
+            side_effect=OSError("fake report disk failure")
+        ))
+
+    assert run_fresh_main() == 1
+
+    record = saved_record(tmp_path)
+    assert record.status == "failed" and record.error_stage == expected_stage
+    assert record.schema_version == 1 and record.application_version == "0.4.0"
+    assert record.api_totals.logical_call_count == mocks.parse.call_count == call_count
+    assert record.verification_accepted_count == accepted
+    assert record.curated_item_count == curated
+    assert record.report_path is None
+    if failure in {"research", "raw_save"}:
+        assert record.raw_research_path is None
+    else:
+        assert record.raw_research_path.is_file()
+    if failure == "research":
+        assert record.researched_candidate_count is None
+        assert record.api_calls[-1].research_category == RESEARCH_CATEGORIES[2]
+        mocks.curate.assert_not_called()
+    else:
+        assert record.researched_category_count == 6
+        assert record.researched_candidate_count == 1
+        assert [entry.research_category for entry in record.api_calls[:6]] == list(
+            RESEARCH_CATEGORIES
+        )
+        assert all(entry.research_category is None for entry in record.api_calls[6:])
+    if failure_index is not None:
+        assert record.api_calls[-1].status == "failed"
+        assert record.api_totals.usage_complete is False
+        assert record.api_totals.total_tokens is None
+    else:
+        assert all(entry.status == "success" for entry in record.api_calls)
+    if accepted is None:
+        assert record.verification_rejected_count is None
+        mocks.generate.assert_not_called()
+    else:
+        assert record.verification_rejected_count == 0
+        raw_source = saved_raw(tmp_path).categories[0].items[0].sources[0]
+        assert raw_source.fact_support is not None
+    if curated is None:
+        mocks.generate.assert_not_called()
+
+
+@pytest.mark.parametrize("primary_failure", [False, True])
+def test_real_pipeline_run_record_failure_is_best_effort(
+    primary_failure: bool, monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    mocks = install_responses_pipeline(
+        monkeypatch, tmp_path, make_research_run(make_item(1)),
+    )
+    if primary_failure:
+        mocks.responses[6] = RuntimeError("fake primary provider failure")
+        mocks.parse.side_effect = mocks.responses
+    save_record = Mock(side_effect=OSError("fake telemetry disk failure"))
+    monkeypatch.setattr(main_module, "save_run_record", save_record)
+
+    assert run_fresh_main() == (1 if primary_failure else 0)
+
+    save_record.assert_called_once()
+    record = save_record.call_args.args[0]
+    assert record.verification_accepted_count == 1
+    assert record.raw_research_path.is_file()
+    output = capsys.readouterr()
+    assert "Warning: Could not save run telemetry" in output.err
+    if primary_failure:
+        assert "OpenAI curation request failed" in output.err
+        assert record.error_stage == "curate" and record.report_path is None
+        assert mocks.parse.call_count == 7
+        mocks.generate.assert_not_called()
+    else:
+        assert record.status == "success" and record.report_path.is_file()
+        assert mocks.parse.call_count == 8
+
+
+@pytest.mark.parametrize(
+    "malformed", ["story_id", "concept_id", "url", "factual_field"],
+)
+def test_real_pipeline_report_boundary_rejects_invalid_generated_content(
+    malformed: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    content = report_content()
+    if malformed == "story_id":
+        content["story_explanations"][0]["story_id"] = "story_999"
+    elif malformed == "concept_id":
+        content["concepts"][0]["related_story_ids"] = ["story_999"]
+    elif malformed == "url":
+        content["story_explanations"][0]["student_takeaway"] = (
+            "Visit https://example.com/invented"
+        )
+    else:
+        content["story_explanations"][0]["what_happened"] = (
+            "A rewritten authoritative fact."
+        )
+    mocks = install_responses_pipeline(
+        monkeypatch, tmp_path, make_research_run(make_item(1)), content=content,
+    )
+
+    assert run_fresh_main() == 1
+
+    record = saved_record(tmp_path)
+    assert record.error_stage == "report" and record.report_path is None
+    assert record.verification_accepted_count == record.curated_item_count == 1
+    assert record.raw_research_path.is_file()
+    assert record.api_totals.logical_call_count == mocks.parse.call_count == 8
+    # Successful transport/parse observation is not stage consistency success.
+    assert record.api_calls[-1].status == "success"
+
+
+@pytest.mark.parametrize("outcome", ["success", "provider_failure", "interrupt"])
+def test_backwards_run_clock_preserves_primary_outcome_without_false_record(
+    outcome: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    mocks = install_responses_pipeline(
+        monkeypatch, tmp_path, make_research_run(make_item(1)),
+    )
+    started_at = datetime(2026, 9, 18, 23, 28, 45, tzinfo=UTC)
+    finished_at = started_at - timedelta(seconds=1)
+    clock = Mock(side_effect=[started_at, finished_at])
+    monkeypatch.setattr(main_module, "_utc_now", clock)
+    save_record = Mock(wraps=main_module.save_run_record)
+    monkeypatch.setattr(main_module, "save_run_record", save_record)
+    if outcome != "success":
+        mocks.responses[6] = (
+            KeyboardInterrupt() if outcome == "interrupt"
+            else RuntimeError("fake primary provider failure")
+        )
+        mocks.parse.side_effect = mocks.responses
+
+    expected_exit = {"success": 0, "provider_failure": 1, "interrupt": 130}[outcome]
+    assert run_fresh_main() == expected_exit
+
+    output = capsys.readouterr()
+    assert "UTC clock moved backwards" in output.err
+    assert started_at.isoformat() in output.err
+    assert finished_at.isoformat() in output.err
+    assert "RunRecord not written" in output.err
+    clock.assert_has_calls([call(), call()])
+    save_record.assert_not_called()
+    assert not (tmp_path / "runs").exists()
+    # Standalone schema validation must still reject inverted timestamps.
+    with pytest.raises(ValueError, match="started_at must not be after finished_at"):
+        RunRecord(
+            application_version="0.4.0", date_range=DATE_RANGE,
+            started_at=started_at, finished_at=finished_at, status="success",
+            api_totals=main_module.TelemetryRecorder().aggregate(),
+        )
+    assert saved_raw(tmp_path) == make_research_run(make_item(1))
+    if outcome == "success":
+        assert (tmp_path / "reports" / "2026-W37.md").is_file()
+        assert "API calls: 8" in output.out
+        assert "Tokens: 120" in output.out
+        assert "Run telemetry saved" not in output.out
+    elif outcome == "provider_failure":
+        assert "OpenAI curation request failed" in output.err
+        assert not (tmp_path / "reports").exists()
+    else:
+        assert "Interrupted by user" in output.err
+        assert not (tmp_path / "reports").exists()

@@ -3,10 +3,10 @@
 from collections import Counter
 from collections.abc import Mapping
 from dataclasses import dataclass
+from datetime import date
 import json
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlsplit, urlunsplit
 
 from pydantic import BaseModel, ValidationError
 
@@ -15,8 +15,11 @@ from ai_weekly_agent.models import (
     CurationAssessment,
     CuratedItem,
     NewsItem,
+    ORIGINAL_EVALUATION_SOURCE_TYPES,
+    PRIMARY_EVIDENCE_SOURCE_TYPES,
     ResearchRun,
 )
+from ai_weekly_agent.research import normalize_source_url
 
 
 # A score above neutral prevents middling candidates from becoming filler.
@@ -25,9 +28,6 @@ MAX_CURATED_ITEMS = 12
 
 # Only near-ties receive a category-diversity preference.
 _DIVERSITY_SCORE_WINDOW = 0.25
-_PRIMARY_SOURCE_TYPES = frozenset(
-    {"official", "paper", "github", "university", "benchmark"}
-)
 _SURROUNDING_TITLE_PUNCTUATION = " \t\r\n.,!?;:'\"()[]{}<>-–—"
 _AUDIENCE = (
     "a university Computer Engineering student who is learning about "
@@ -184,23 +184,38 @@ def _has_text(value: object) -> bool:
 def _deduplicate_exact_candidates(
     candidates: list[_Candidate],
 ) -> list[_Candidate]:
-    groups: list[list[_Candidate]] = []
+    # Anchor groups are established independently, never by overlapping URLs.
+    anchor_groups: dict[tuple[str, date], list[_Candidate]] = {}
+    singletons: list[_Candidate] = []
     for candidate in candidates:
-        matching_group = next(
-            (
-                group
-                for group in groups
-                if any(
-                    _are_exact_duplicates(candidate, member)
-                    for member in group
-                )
-            ),
-            None,
-        )
-        if matching_group is None:
-            groups.append([candidate])
+        anchor = _event_anchor(candidate.item)
+        if anchor is None:
+            singletons.append(candidate)
         else:
-            matching_group.append(candidate)
+            anchor_groups.setdefault(anchor, []).append(candidate)
+
+    # Finalized anchor groups cannot be bridged into title groups. Their members
+    # may have different titles/organizations, so using a representative's title
+    # as a new group identity would discard the original identity safeguards.
+    groups = [group for group in anchor_groups.values() if len(group) > 1]
+    singletons.extend(
+        group[0] for group in anchor_groups.values() if len(group) == 1
+    )
+    title_groups: list[list[_Candidate]] = []
+    for candidate in sorted(singletons, key=lambda entry: entry.input_index):
+        matches = [
+            group for group in title_groups
+            if all(
+                _same_title_event(candidate.item, member.item) for member in group
+            )
+        ]
+        if len(matches) == 1:
+            matches[0].append(candidate)
+        else:
+            # An undated record can match multiple conflicting dated groups.
+            # Keep ambiguous records separate rather than connect those groups.
+            title_groups.append([candidate])
+    groups.extend(title_groups)
 
     representatives = [
         max(group, key=_exact_representative_key) for group in groups
@@ -208,41 +223,91 @@ def _deduplicate_exact_candidates(
     return sorted(representatives, key=lambda candidate: candidate.input_index)
 
 
-def _are_exact_duplicates(left: _Candidate, right: _Candidate) -> bool:
-    if _normalize_title(left.item.title) == _normalize_title(right.item.title):
-        return True
-
-    shared_urls = _source_urls(left.item) & _source_urls(right.item)
-    same_organization = (
-        _normalize_optional_text(left.item.organization)
-        and _normalize_optional_text(left.item.organization)
-        == _normalize_optional_text(right.item.organization)
-    )
-    same_category = _normalize_title(left.item.category) == _normalize_title(
-        right.item.category
-    )
-    dates_do_not_conflict = (
-        left.item.published_date is None
-        or right.item.published_date is None
-        or left.item.published_date == right.item.published_date
-    )
-    return bool(
-        shared_urls
-        and same_organization
-        and same_category
-        and dates_do_not_conflict
-    )
+def _event_anchor(item: NewsItem) -> tuple[str, date] | None:
+    """Return the first explicit primary summary/event URL and known date."""
+    if item.published_date is None:
+        return None
+    for source in item.sources:
+        if (
+            source.source_type.casefold() in PRIMARY_EVIDENCE_SOURCE_TYPES
+            and source.fact_support is not None
+            and source.fact_support.summary
+            and "event" in (source.evidence_roles or [])
+            and (url := normalize_source_url(source.url)) is not None
+        ):
+            return url, item.published_date
+    return None
 
 
-def _exact_representative_key(candidate: _Candidate) -> tuple[int, int, int, int]:
+def _same_title_event(left: NewsItem, right: NewsItem) -> bool:
+    organization = _normalize_optional_text(left.organization)
+    if (
+        not organization
+        or organization != _normalize_optional_text(right.organization)
+        or _normalize_title(left.title) != _normalize_title(right.title)
+    ):
+        return False
+    if (
+        left.published_date is not None
+        and right.published_date is not None
+        and left.published_date != right.published_date
+    ):
+        return False
+    left_anchor, right_anchor = _event_anchor(left), _event_anchor(right)
+    return left_anchor is None or right_anchor is None or left_anchor == right_anchor
+
+
+def _explicit_evidence_counts(item: NewsItem) -> tuple[int, int]:
+    """Count reported supporting URLs, not background or prose quantity.
+
+    This is a structural preference for already verified inputs, not a second
+    verification engine. Benchmark originals qualify only as benchmark support.
+    """
+    primary_urls: set[str] = set()
+    supporting_urls: set[str] = set()
+    for source in item.sources:
+        support = source.fact_support
+        url = normalize_source_url(source.url)
+        if support is None or url is None:
+            continue
+        roles = source.evidence_roles or []
+        primary = source.source_type.casefold() in PRIMARY_EVIDENCE_SOURCE_TYPES
+        supports_facts = (
+            (support.summary and "event" in roles)
+            or (item.published_date is not None and "event_date" in roles)
+            or (bool(support.technical_detail_indices) and "technical" in roles)
+        )
+        supports_benchmark = (
+            support.benchmark
+            and "benchmark" in roles
+            and bool(item.benchmark_information)
+        )
+        if primary and supports_facts:
+            primary_urls.add(url)
+        if (
+            supports_facts
+            and (primary or source.source_type.casefold() == "secondary")
+        ) or (
+            supports_benchmark
+            and source.source_type.casefold() in ORIGINAL_EVALUATION_SOURCE_TYPES
+        ):
+            supporting_urls.add(url)
+    return len(primary_urls), len(supporting_urls)
+
+
+def _exact_representative_key(
+    candidate: _Candidate,
+) -> tuple[int, int, int, int, int]:
     return (
-        len(candidate.item.sources),
-        int(candidate.item.published_date is not None),
-        sum(
-            len(detail.strip())
-            for detail in (candidate.item.technical_details or [])
-            if isinstance(detail, str)
+        int(
+            all(
+                source.fact_support is not None
+                and source.evidence_roles is not None
+                for source in candidate.item.sources
+            )
         ),
+        *_explicit_evidence_counts(candidate.item),
+        int(candidate.item.published_date is not None),
         -candidate.input_index,
     )
 
@@ -255,28 +320,6 @@ def _normalize_title(value: str) -> str:
 
 def _normalize_optional_text(value: str | None) -> str:
     return " ".join(value.casefold().split()) if value else ""
-
-
-def _source_urls(item: NewsItem) -> set[str]:
-    return {
-        normalized
-        for source in item.sources
-        if (normalized := _normalize_url(source.url)) is not None
-    }
-
-
-def _normalize_url(value: str) -> str | None:
-    try:
-        parsed = urlsplit(value.strip())
-    except (AttributeError, ValueError):
-        return None
-    scheme = parsed.scheme.lower()
-    netloc = parsed.netloc.lower()
-    if scheme not in {"http", "https"} or not netloc:
-        return None
-    return urlunsplit(
-        (scheme, netloc, parsed.path.rstrip("/"), parsed.query, "")
-    )
 
 
 def _render_prompt(candidates: list[_Candidate]) -> str:
@@ -410,7 +453,18 @@ def _semantic_representative_key(
 
 def _primary_source_count(item: NewsItem) -> int:
     return sum(
-        source.source_type.casefold() in _PRIMARY_SOURCE_TYPES
+        source.source_type.casefold() in PRIMARY_EVIDENCE_SOURCE_TYPES
+        and (
+            source.fact_support is None
+            or (
+                source.fact_support.summary
+                and "event" in (source.evidence_roles or [])
+            )
+            or (
+                item.published_date is not None
+                and "event_date" in (source.evidence_roles or [])
+            )
+        )
         for source in item.sources
     )
 

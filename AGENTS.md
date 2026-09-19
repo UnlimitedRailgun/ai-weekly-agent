@@ -2,7 +2,7 @@
 
 ## Product Goal and Audience
 
-This repository contains Version 0.3 of an AI & Computer Engineering Weekly
+This repository contains Version 0.4.0 of an AI & Computer Engineering Weekly
 Research Agent. Its target reader is a university Computer Engineering student
 who is relatively new to the AI industry. The agent must produce a reliable,
 approachable weekly overview without assuming deep industry knowledge, while
@@ -94,6 +94,35 @@ Use reputable secondary reporting only when it adds necessary context or when no
 Every selected item must retain at least one credible URL. Links must resolve to sources that directly support the associated claims. Analysis may simplify technical material for beginners, but simplification must not change the meaning or certainty of the source.
 
 Source evidence roles are model-reported classifications. Deterministic Verify can enforce their presence and consistency with structured fields, but cannot establish the semantic truth of page content or historical claims on mutable product pages. Keep that limitation explicit and do not treat verification success as independent fact-checking.
+
+### Version 0.4 Provenance and Integration
+
+Source-local FactSupport is additive and optional for legacy raw parsing. New
+metadata items receive deterministic per-fact primary/original-evidence checks;
+entirely legacy historical/manual items retain compatibility behavior with a
+lower-assurance warning under standalone default verification. Normal fresh main
+execution explicitly passes `require_provenance=True` after saving the unchanged
+raw ResearchRun; no fresh candidate may use legacy acceptance to enter Curator.
+Do not add a gate opt-out or compatibility retry. All-rejected candidates use the
+existing successful empty-report path without Curator/Report API requests.
+Curator exact deduplication is implemented: the first qualifying explicit
+primary summary/event Source URL plus a known matching date supplies a narrow
+cross-category identity proxy. Guard title matches by non-empty organization and
+compatible dates, with no conflicting anchors or transitive bridging. Keep one
+whole upstream record; never merge facts or metadata. Prefer explicit supporting
+evidence, not prose length or background count. Benchmark originals support
+evaluation results, not primary event/date quality. Legacy candidates remain
+supported and ambiguous duplicates still reach the single semantic assessment.
+Verify acceptance counts describe pre-dedup accepted items, not prepared Curator
+counts. Keep RunRecord schema 1 and existing truthful empty/failure telemetry.
+These model-reported classifications and identity proxies are not independent
+semantic verification. Package/application version is 0.4.0; RunRecord schema
+remains 1. One approved
+Phase 5 live run completed with eight logical calls, eleven strict acceptances,
+and ten final stories. No duplicate group occurred live; exact and semantic
+duplicate resolution remain offline-tested, not live-proven by that sample.
+Keep unknown-date, mutable-page, and single-source limitations explicit; no
+additional live run or independent external fact-checking is implied.
 
 ## Technology Requirements
 

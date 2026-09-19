@@ -3,6 +3,8 @@
 from collections import Counter
 
 from ai_weekly_agent.models import (
+    ORIGINAL_EVALUATION_SOURCE_TYPES,
+    PRIMARY_EVIDENCE_SOURCE_TYPES,
     CategoryResearchResult,
     NewsItem,
     ResearchRun,
@@ -26,8 +28,14 @@ def item_identifier(category_position: int, item_position: int) -> str:
     return f"category_{category_position:02d}:item_{item_position:03d}"
 
 
-def verify_research_run(research_run: ResearchRun) -> VerificationResult:
-    """Return a separately constructed run containing only accepted items."""
+def verify_research_run(
+    research_run: ResearchRun, *, require_provenance: bool = False
+) -> VerificationResult:
+    """Check reported evidence locally, without establishing page semantics.
+
+    Legacy items retain compatibility behavior unless provenance is required.
+    Any item with new metadata receives the complete fact-support checks.
+    """
     _validate_category_structure(research_run)
 
     accepted_categories: list[CategoryResearchResult] = []
@@ -45,6 +53,7 @@ def verify_research_run(research_run: ResearchRun) -> VerificationResult:
                 containing_category=category_result.category,
                 research_run=research_run,
                 item_id=item_id,
+                require_provenance=require_provenance,
             )
             findings.extend(item_findings)
             if accepted_item is None:
@@ -106,9 +115,9 @@ def _verify_item(
     containing_category: str,
     research_run: ResearchRun,
     item_id: str,
+    require_provenance: bool,
 ) -> tuple[NewsItem | None, list[VerificationFinding]]:
     usable_sources, findings = _verified_sources(item.sources, item_id)
-    hard_failure = False
 
     if not usable_sources:
         findings.append(
@@ -119,7 +128,6 @@ def _verify_item(
                 "The item has no usable HTTP or HTTPS source URL.",
             )
         )
-        hard_failure = True
 
     if item.category != containing_category:
         findings.append(
@@ -130,7 +138,6 @@ def _verify_item(
                 "The item category does not match its containing category.",
             )
         )
-        hard_failure = True
 
     if item.published_date is None:
         findings.append(
@@ -154,63 +161,16 @@ def _verify_item(
                 "The known event date is outside the reporting window.",
             )
         )
-        hard_failure = True
 
     if usable_sources:
-        if any(source.evidence_roles is None for source in usable_sources):
-            findings.append(
-                _finding(
-                    item_id,
-                    "warning",
-                    "legacy_evidence_roles",
-                    "At least one source has no evidence-role metadata.",
-                )
-            )
+        # Discarding a new-metadata source must not downgrade the remaining item.
+        use_fact_support = require_provenance or any(
+            source.fact_support is not None for source in item.sources
+        )
+        if use_fact_support:
+            findings.extend(_fact_support_findings(item, usable_sources, item_id))
         else:
-            roles = {
-                role
-                for source in usable_sources
-                for role in (source.evidence_roles or [])
-            }
-            if "event" not in roles:
-                findings.append(
-                    _finding(
-                        item_id,
-                        "hard_failure",
-                        "event_evidence_missing",
-                        "No usable source is classified as direct event evidence.",
-                    )
-                )
-                hard_failure = True
-            if item.published_date is not None and "event_date" not in roles:
-                findings.append(
-                    _finding(
-                        item_id,
-                        "hard_failure",
-                        "event_date_evidence_missing",
-                        "The known event date has no classified date evidence.",
-                    )
-                )
-                hard_failure = True
-            if _has_text(item.benchmark_information) and "benchmark" not in roles:
-                findings.append(
-                    _finding(
-                        item_id,
-                        "hard_failure",
-                        "benchmark_evidence_missing",
-                        "Benchmark information has no classified benchmark evidence.",
-                    )
-                )
-                hard_failure = True
-            if _has_technical_details(item) and "technical" not in roles:
-                findings.append(
-                    _finding(
-                        item_id,
-                        "warning",
-                        "technical_evidence_missing",
-                        "Technical details have no classified technical evidence.",
-                    )
-                )
+            findings.extend(_legacy_evidence_findings(item, usable_sources, item_id))
 
         if all(
             source.source_type.casefold() == "secondary"
@@ -225,13 +185,179 @@ def _verify_item(
                 )
             )
 
-    if hard_failure:
+    if any(finding.severity == "hard_failure" for finding in findings):
         return None, findings
 
     return item.model_copy(
         update={"sources": usable_sources},
         deep=True,
     ), findings
+
+
+def _legacy_evidence_findings(
+    item: NewsItem, sources: list[Source], item_id: str
+) -> list[VerificationFinding]:
+    """Preserve pre-provenance checks and explicitly label lower assurance."""
+    findings = [
+        _finding(
+            item_id,
+            "warning",
+            "legacy_fact_support",
+            "Legacy item has no fact-support metadata; acceptance does not "
+            "establish the new provenance policy.",
+        )
+    ]
+    if any(source.evidence_roles is None for source in sources):
+        findings.append(
+            _finding(
+                item_id,
+                "warning",
+                "legacy_evidence_roles",
+                "At least one source has no evidence-role metadata.",
+            )
+        )
+        return findings
+
+    roles = {role for source in sources for role in (source.evidence_roles or [])}
+    if "event" not in roles:
+        findings.append(
+            _finding(
+                item_id, "hard_failure", "event_evidence_missing",
+                "No usable source is classified as direct event evidence.",
+            )
+        )
+    if item.published_date is not None and "event_date" not in roles:
+        findings.append(
+            _finding(
+                item_id, "hard_failure", "event_date_evidence_missing",
+                "The known event date has no classified date evidence.",
+            )
+        )
+    if _has_text(item.benchmark_information) and "benchmark" not in roles:
+        findings.append(
+            _finding(
+                item_id, "hard_failure", "benchmark_evidence_missing",
+                "Benchmark information has no classified benchmark evidence.",
+            )
+        )
+    if _has_technical_details(item) and "technical" not in roles:
+        findings.append(
+            _finding(
+                item_id, "warning", "technical_evidence_missing",
+                "Technical details have no classified technical evidence.",
+            )
+        )
+    return findings
+
+
+def _fact_support_findings(
+    item: NewsItem, sources: list[Source], item_id: str
+) -> list[VerificationFinding]:
+    """Validate only explicit support on retained sources, never repair facts."""
+    findings: list[VerificationFinding] = []
+    summary_supported = False
+    date_supported = False
+    technical_indices: set[int] = set()
+    benchmark_supported = False
+
+    for source in sources:
+        support = source.fact_support
+        roles = set(source.evidence_roles or [])
+        missing: list[str] = []
+        if support is None:
+            missing.append("fact_support")
+        if source.evidence_roles is None:
+            missing.append("evidence_roles")
+        if missing:
+            findings.append(
+                _finding(
+                    item_id, "hard_failure", "provenance_metadata_missing",
+                    "Retained source is missing required metadata: "
+                    + ", ".join(missing) + ".",
+                    source_url=source.url,
+                )
+            )
+        if support is None:
+            continue
+
+        contradictions: list[str] = []
+        if support.summary and "event" not in roles:
+            contradictions.append("summary support requires an event role")
+        if support.technical_detail_indices and "technical" not in roles:
+            contradictions.append("detail support requires a technical role")
+        for index in support.technical_detail_indices:
+            if index >= len(item.technical_details):
+                contradictions.append(f"technical detail index {index} is out of range")
+        if support.benchmark:
+            if "benchmark" not in roles:
+                contradictions.append("benchmark support requires a benchmark role")
+            if not _has_text(item.benchmark_information):
+                contradictions.append(
+                    "benchmark support requires benchmark information"
+                )
+        for message in contradictions:
+            findings.append(
+                _finding(
+                    item_id, "hard_failure", "fact_support_inconsistent",
+                    message + ".", source_url=source.url,
+                )
+            )
+
+        source_type = source.source_type.casefold()
+        if source_type in PRIMARY_EVIDENCE_SOURCE_TYPES:
+            if support.summary and "event" in roles:
+                summary_supported = True
+            if "event_date" in roles:
+                date_supported = True
+            if "technical" in roles:
+                technical_indices.update(support.technical_detail_indices)
+        if (
+            source_type in ORIGINAL_EVALUATION_SOURCE_TYPES
+            and support.benchmark
+            and "benchmark" in roles
+        ):
+            benchmark_supported = True
+
+    if not summary_supported:
+        findings.append(
+            _finding(
+                item_id, "hard_failure", "event_evidence_missing",
+                "The summary has no explicit primary/original event support.",
+            )
+        )
+    if item.published_date is not None and not date_supported:
+        findings.append(
+            _finding(
+                item_id, "hard_failure", "event_date_evidence_missing",
+                "The known event date has no primary/original date evidence.",
+            )
+        )
+    for index, detail in enumerate(item.technical_details):
+        if not _has_text(detail) or index not in technical_indices:
+            findings.append(
+                _finding(
+                    item_id, "hard_failure", "technical_evidence_missing",
+                    f"Technical detail index {index} is blank or lacks explicit "
+                    "primary/original technical support.",
+                )
+            )
+    if item.benchmark_information is not None:
+        if not _has_text(item.benchmark_information):
+            findings.append(
+                _finding(
+                    item_id, "hard_failure", "fact_support_inconsistent",
+                    "Benchmark information must contain text or be null.",
+                )
+            )
+        if not benchmark_supported:
+            findings.append(
+                _finding(
+                    item_id, "hard_failure", "benchmark_evidence_missing",
+                    "Benchmark information has no explicit original "
+                    "evaluation support.",
+                )
+            )
+    return findings
 
 
 def _verified_sources(

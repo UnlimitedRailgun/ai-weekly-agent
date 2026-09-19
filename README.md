@@ -1,9 +1,9 @@
 # AI & Computer Engineering Weekly Research Agent
 
 This project produces a beginner-friendly weekly overview of important AI and
-Computer Engineering developments for university students. Version 0.3 is
-deliberately small, synchronous, and local-first, with grounded report output
-and per-category Research telemetry.
+Computer Engineering developments for university students. Version 0.4.0 is
+deliberately small, synchronous, and local-first, with explicit evidence
+provenance, grounded report output, and per-category Research telemetry.
 
 ```text
 Research ×6
@@ -25,6 +25,73 @@ report consistency validation are deterministic local Python and make no API
 calls.
 
 Research results are saved under `data/raw/` before verification. This preserves the original audit artifact, including items that Verify later rejects. Sources may carry model-reported evidence roles such as event, event date, technical, benchmark, or background evidence. Verify checks these classifications and other deterministic rules, but it does not fetch pages or independently prove that a source supports a claim. Rejected items do not reach Curator.
+
+### Version 0.4 provenance support
+
+Sources now optionally carry `fact_support`: summary and benchmark support flags
+plus zero-based technical-detail indices. Old raw Research JSON still parses
+without migration. The Research prompt requests complete metadata.
+
+`verify_research_run(run, require_provenance=True)` requires explicit support
+from model-classified primary/original sources for the summary, known date, and
+every technical detail. Original `benchmark` reports may support performance
+results but do not qualify for event/date or product-specification coverage.
+Missing or contradictory evidence rejects the item without rewriting its facts.
+These checks enforce reported provenance consistency, not webpage semantics.
+
+Normal fresh main execution now explicitly requires provenance; entirely legacy
+or partially supported fresh candidates cannot enter Curator through compatibility
+handling. The raw ResearchRun is saved unchanged before strict filtering.
+Standalone `verify_research_run(old_run)` still supports historical JSON with
+lower-assurance warnings. Any new metadata activates strict checks even under
+that default interface; partial metadata cannot downgrade to legacy handling.
+Version 0.4.0 includes this provenance policy while retaining legacy parsing.
+
+### Version 0.4 exact deduplication
+
+Curator now groups candidates across categories using the first explicitly
+summary-supporting primary event Source URL and the same known published date.
+It reuses Research URL normalization without redirects or query stripping.
+This narrow, model-reported URL/date identity proxy is not semantic proof: a
+multi-event page can still cause a false merge if misclassified as the anchor.
+
+Title-only matching requires identical normalized titles and non-empty normalized
+organizations, no conflicting known dates, and no conflicting explicit anchors.
+Unknown dates remain compatible for guarded titles, but cannot bridge conflicting
+dated groups. Finalized anchor groups are not regrouped through titles. Arbitrary
+shared/background URLs no longer create local identity matches.
+
+Exact groups keep one complete original record, preferring complete provenance,
+unique primary factual support, then relevant explicit supporting Sources,
+known dates, and original order. No facts, detail order, Sources, or metadata are
+merged; prose length and background count do not influence this choice.
+Original benchmark evidence may improve benchmark support, not event-primary
+quality. Legacy candidates remain supported through guarded title matching.
+Unresolved or ambiguous duplicates still reach the existing single non-search
+Curator assessment. Historical/manual Curator preparation still supports legacy
+candidates, but normal fresh main execution accepts only strict Verify output.
+
+### Version 0.4 integration and validation
+
+Normal runs now use `verify_research_run(run, require_provenance=True)` without
+an opt-out, compatibility retry, new setting, or extra API call. Candidate-level
+rejection is ordinary filtering, not a whole-run error. If no candidates survive
+Verify, six Research calls still occur and the report is rendered locally without
+Curator or Report calls. If Curator selects nothing, Report likewise makes no call.
+
+RunRecords retain schema version 1 and distinct research, Verify accepted/rejected,
+and final curated counts. Exact dedup does not reduce the Verify accepted count;
+no local prepared/dedup counter is stored. Populated successful fake integration
+runs exercise eight logical calls, one base client/shared recorder, truthful
+usage and failure paths, and unchanged upstream factual Markdown ownership.
+One approved live run for 2026-09-06 through 2026-09-12 also completed successfully:
+11 raw candidates, 11 strict Verify acceptances, 11 candidates after exact
+preparation, and 10 final stories using eight logical calls. Every retained
+Source carried FactSupport and evidence roles. No exact or semantic duplicate
+group occurred in that sample; duplicate resolution and strict rejection remain
+offline-tested rather than demonstrated live by this run. Neither offline tests
+nor this single live sample independently verify webpage semantics or establish
+universal model compliance. No additional live run is implied or authorized.
 
 ### Grounded reporting
 
@@ -177,6 +244,15 @@ The application does not schedule or automatically trigger weekly runs.
   locally; it does not reopen sources or independently establish semantic truth.
 - Research facts remain model-reported and evidence-covered rather than
   independently verified against webpage meaning.
+- FactSupport and primary/original source classifications are model-reported.
+  Mutable pages may not establish historical launch-time evidence. Unknown
+  event dates may remain null with a warning, so weekly inclusion is uncertain.
+- Strict Verify rejects an entire candidate when required evidence is missing;
+  this favors precision over recall rather than repairing unsupported details.
+- Canonical URL/date identity is a conservative proxy that can miss duplicates
+  or falsely merge misclassified multi-event pages. Exact merging was not
+  exercised in the approved v0.4 live sample. Keeping one whole record discards
+  complementary evidence from other duplicate records.
 - Report interpretations and beginner explanations can still be imperfect even
   though authoritative factual fields are rendered from upstream data.
 - Research is synchronous and processes the six categories sequentially.
@@ -184,6 +260,8 @@ The application does not schedule or automatically trigger weekly runs.
   retry attempts, and it does not estimate cost.
 - Reports and telemetry are local files. There is no scheduler or automatic
   delivery.
+- Report filenames use the end date's ISO week; different ranges ending in the
+  same week collide unless intentionally overwritten.
 - Databases, RAG, a web UI, and historical analytics remain out of scope.
 
 ## Tests
