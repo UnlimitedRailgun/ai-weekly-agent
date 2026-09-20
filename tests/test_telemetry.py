@@ -2,15 +2,17 @@ import json
 from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, Literal
 
 import pytest
-from pydantic import ValidationError
+from pydantic import BaseModel, ValidationError
 
 import ai_weekly_agent.telemetry as telemetry_module
 from ai_weekly_agent.models import DateRange
 from ai_weekly_agent.telemetry import (
     ApiCallRecord,
+    HistoricalStatusCounts,
+    HistoryTelemetrySummary,
     RunRecord,
     TelemetryRecorder,
     observe_openai_client,
@@ -100,6 +102,7 @@ def make_run_record(
     max_retries: int | None = None,
     timeout_seconds: float | None = None,
     api_calls: list[ApiCallRecord] | None = None,
+    history: HistoryTelemetrySummary | None = None,
 ) -> RunRecord:
     calls = api_calls if api_calls is not None else [make_api_call()]
     recorder = TelemetryRecorder()
@@ -123,6 +126,7 @@ def make_run_record(
         verification_warning_count=2 if status == "success" else None,
         verification_information_count=1 if status == "success" else None,
         curated_item_count=8 if status == "success" else None,
+        history=history,
         raw_research_path=(
             Path("data/raw/example.json") if status == "success" else None
         ),
@@ -487,6 +491,7 @@ def test_successful_run_record_round_trips_through_json() -> None:
 
 def test_old_schema_v1_json_without_research_category_still_parses() -> None:
     payload = make_run_record().model_dump(mode="json")
+    payload.pop("history")
     for call in payload["api_calls"]:
         call.pop("research_category", None)
 
@@ -495,6 +500,159 @@ def test_old_schema_v1_json_without_research_category_still_parses() -> None:
     assert restored.schema_version == 1
     assert restored.api_calls[0].stage == "research"
     assert restored.api_calls[0].research_category is None
+    assert restored.history is None
+
+
+def test_history_telemetry_summary_round_trips_without_content() -> None:
+    summary = HistoryTelemetrySummary(
+        load_state="partial",
+        usable_run_count=3,
+        reconstructed_story_count=11,
+        skipped_entry_count=2,
+        prepared_candidate_count=7,
+        matched_current_candidate_count=2,
+        validated_status_counts=HistoricalStatusCounts(
+            new=3,
+            follow_up=1,
+            repeat=2,
+            uncertain=1,
+        ),
+        repeats_suppressed=2,
+        selected_follow_up_count=1,
+    )
+    record = make_run_record(history=summary)
+
+    restored = RunRecord.model_validate_json(record.model_dump_json())
+
+    assert restored.history == summary
+    assert restored.schema_version == 1
+    serialized = restored.model_dump_json()
+    for forbidden in (
+        "PRIVATE_TITLE",
+        "PRIVATE_SUMMARY",
+        "https://",
+        "material_change",
+        "source_url",
+        "artifact_path",
+    ):
+        assert forbidden not in serialized
+
+
+def test_history_telemetry_distinguishes_known_zero_from_not_executed() -> None:
+    loaded_only = HistoryTelemetrySummary(
+        load_state="complete",
+        usable_run_count=1,
+        reconstructed_story_count=2,
+        skipped_entry_count=0,
+    )
+    completed = loaded_only.model_copy(
+        update={
+            "prepared_candidate_count": 0,
+            "matched_current_candidate_count": 0,
+            "validated_status_counts": None,
+            "repeats_suppressed": None,
+            "selected_follow_up_count": None,
+        }
+    )
+
+    assert loaded_only.prepared_candidate_count is None
+    assert completed.prepared_candidate_count == 0
+    assert completed.matched_current_candidate_count == 0
+    assert completed.validated_status_counts is None
+
+
+def test_released_v04_reader_shape_ignores_additive_history_field() -> None:
+    class ReleasedV04Reader(BaseModel):
+        schema_version: Literal[1] = 1
+        application_version: str
+        date_range: DateRange
+        started_at: datetime
+        finished_at: datetime
+        status: Literal["success", "failed"]
+
+    record = make_run_record(
+        history=HistoryTelemetrySummary(
+            load_state="unavailable",
+            usable_run_count=0,
+            reconstructed_story_count=0,
+            skipped_entry_count=1,
+        )
+    )
+    payload = record.model_dump(mode="json")
+
+    restored = ReleasedV04Reader.model_validate(payload)
+
+    assert restored.schema_version == 1
+    assert "history" not in restored.model_dump()
+
+
+@pytest.mark.parametrize(
+    "field",
+    [
+        "usable_run_count",
+        "reconstructed_story_count",
+        "skipped_entry_count",
+        "prepared_candidate_count",
+        "matched_current_candidate_count",
+        "repeats_suppressed",
+        "selected_follow_up_count",
+    ],
+)
+def test_history_telemetry_rejects_negative_counts(field: str) -> None:
+    payload: dict[str, object] = {
+        "load_state": "complete",
+        "usable_run_count": 1,
+        "reconstructed_story_count": 1,
+        "skipped_entry_count": 0,
+        field: -1,
+    }
+
+    with pytest.raises(ValidationError):
+        HistoryTelemetrySummary.model_validate(payload)
+
+
+@pytest.mark.parametrize(
+    "payload_update",
+    [
+        {
+            "prepared_candidate_count": 1,
+            "matched_current_candidate_count": 2,
+        },
+        {
+            "prepared_candidate_count": 2,
+            "validated_status_counts": {
+                "new": 1, "follow_up": 0, "repeat": 0, "uncertain": 0,
+            },
+            "repeats_suppressed": 0,
+            "selected_follow_up_count": 0,
+        },
+        {
+            "prepared_candidate_count": 1,
+            "validated_status_counts": {
+                "new": 0, "follow_up": 0, "repeat": 1, "uncertain": 0,
+            },
+            "repeats_suppressed": 0,
+            "selected_follow_up_count": 0,
+        },
+        {
+            "prepared_candidate_count": 1,
+            "repeats_suppressed": 0,
+        },
+    ],
+)
+def test_history_telemetry_rejects_inconsistent_stage_counts(
+    payload_update: dict[str, object],
+) -> None:
+    payload = {
+        "load_state": "complete",
+        "usable_run_count": 1,
+        "reconstructed_story_count": 2,
+        "skipped_entry_count": 0,
+        **payload_update,
+    }
+
+    with pytest.raises(ValidationError):
+        HistoryTelemetrySummary.model_validate(payload)
 
 
 def test_failed_partial_run_record_round_trips_through_json() -> None:

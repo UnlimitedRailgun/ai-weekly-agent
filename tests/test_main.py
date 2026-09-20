@@ -12,11 +12,13 @@ import ai_weekly_agent.report as report_module
 import ai_weekly_agent.research as research_module
 from ai_weekly_agent.config import AppConfig
 from ai_weekly_agent.curate import CuratorError
+from ai_weekly_agent.history import HistoryDiagnostic, HistoryLoadResult
 from ai_weekly_agent.models import (
     CategoryResearchResult,
     CuratedItem,
     DateRange,
     FactSupport,
+    HistoricalStory,
     NewsItem,
     ResearchRun,
     Source,
@@ -71,6 +73,51 @@ def make_research_run(*items: NewsItem) -> ResearchRun:
     )
 
 
+def make_history_result(
+    state: str,
+    *stories: HistoricalStory,
+    skipped_count: int = 0,
+) -> HistoryLoadResult:
+    diagnostics = (
+        (
+            HistoryDiagnostic(
+                code="test_history_gap",
+                message="One sanitized historical entry was skipped.",
+            ),
+        )
+        if skipped_count
+        else ()
+    )
+    return HistoryLoadResult(
+        state=state,
+        stories=tuple(stories),
+        diagnostics=diagnostics,
+        runs_loaded=int(bool(stories)),
+        skipped_count=skipped_count,
+    )
+
+
+def historical_story(
+    current: NewsItem,
+    *,
+    history_id: str = "history_2026-08-23_to_2026-08-29_story_001",
+    title: str = "Prior story",
+    position: int = 1,
+) -> HistoricalStory:
+    prior_item = current.model_copy(deep=True)
+    prior_item.title = title
+    prior_item.published_date = date(2026, 8, 27)
+    prior_item.summary = f"Prior summary for {title}."
+    return HistoricalStory(
+        history_id=history_id,
+        report_date_range=DateRange(
+            start=date(2026, 8, 23), end=date(2026, 8, 29)
+        ),
+        report_position=position,
+        item=prior_item,
+    )
+
+
 def install_pipeline(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -101,6 +148,15 @@ def install_pipeline(
         generate=Mock(return_value="# Weekly report\n"),
         save_report=Mock(return_value=report_path),
         save_run_record=Mock(return_value=run_record_path),
+        load_history=Mock(
+            return_value=HistoryLoadResult(
+                state="unavailable",
+                stories=(),
+                diagnostics=(),
+                runs_loaded=0,
+                skipped_count=0,
+            )
+        ),
         base_client=base_client,
         run=run,
         curated=curated,
@@ -113,6 +169,7 @@ def install_pipeline(
     monkeypatch.setattr(main_module, "REPORTS_DIR", tmp_path / "reports")
     monkeypatch.setattr(main_module, "RUNS_DIR", tmp_path / "runs")
     monkeypatch.setattr(main_module, "load_config", mocks.load_config)
+    monkeypatch.setattr(main_module, "load_history", mocks.load_history)
     monkeypatch.setattr(
         main_module,
         "create_openai_client",
@@ -174,7 +231,7 @@ def make_stages_call_api(
             )
         return mocks.run
 
-    def curate(*_args: object, client: object) -> list[CuratedItem]:
+    def curate(*_args: object, client: object, **_kwargs: object) -> list[CuratedItem]:
         client.responses.parse(model=CONFIG.openai_model)
         return mocks.curated
 
@@ -337,6 +394,18 @@ def test_pipeline_order_data_flow_counts_and_console_output(
     mocks.save_research.side_effect = (
         lambda *_args, **_kwargs: (events("save raw"), mocks.raw_path)[1]
     )
+    mocks.load_history.side_effect = (
+        lambda *_args, **_kwargs: (
+            events("load history"),
+            HistoryLoadResult(
+                state="unavailable",
+                stories=(),
+                diagnostics=(),
+                runs_loaded=0,
+                skipped_count=0,
+            ),
+        )[1]
+    )
     real_verify = main_module.verify_research_run
     monkeypatch.setattr(
         main_module,
@@ -377,6 +446,7 @@ def test_pipeline_order_data_flow_counts_and_console_output(
         call("research"),
         call("save raw"),
         call("verify"),
+        call("load history"),
         call("curate"),
         call("generate report"),
         call("save report"),
@@ -389,7 +459,19 @@ def test_pipeline_order_data_flow_counts_and_console_output(
     curated_run = mocks.curate.call_args.args[0]
     assert curated_run == mocks.run
     assert curated_run is not mocks.run
-    mocks.curate.assert_called_once_with(curated_run, CONFIG, client=ANY)
+    mocks.curate.assert_called_once_with(
+        curated_run,
+        CONFIG,
+        client=ANY,
+        history=ANY,
+        statistics=ANY,
+    )
+    mocks.load_history.assert_called_once_with(
+        DATE_RANGE,
+        runs_dir=tmp_path / "runs",
+        raw_dir=tmp_path / "raw",
+        reports_dir=tmp_path / "reports",
+    )
     mocks.generate.assert_called_once_with(
         DATE_RANGE,
         mocks.curated,
@@ -562,12 +644,20 @@ def test_zero_or_fewer_than_eight_curated_stories_are_allowed(
     result = main_module.main([])
 
     assert result == 0
-    mocks.generate.assert_called_once_with(
-        DATE_RANGE,
-        curated,
-        CONFIG,
-        client=ANY,
-    )
+    if curated_count == 0:
+        mocks.generate.assert_called_once_with(
+            DATE_RANGE,
+            curated,
+            CONFIG,
+            empty_reason="no_selection",
+        )
+    else:
+        mocks.generate.assert_called_once_with(
+            DATE_RANGE,
+            curated,
+            CONFIG,
+            client=ANY,
+        )
     mocks.save_report.assert_called_once()
 
 
@@ -787,12 +877,16 @@ def test_original_raw_run_is_saved_before_verify_and_curator_gets_accepted_run(
 
     mocks.save_research.side_effect = save_raw
     monkeypatch.setattr(main_module, "verify_research_run", verify)
+    mocks.load_history.side_effect = lambda *_args, **_kwargs: (
+        events.append("load history"),
+        make_history_result("unavailable"),
+    )[1]
     mocks.curate.side_effect = curate
 
     result = main_module.main([])
 
     assert result == 0
-    assert events == ["save raw", "verify", "curate"]
+    assert events == ["save raw", "verify", "load history", "curate"]
     saved_path = tmp_path / "raw" / "2026-09-01_to_2026-09-07.json"
     raw_data = json.loads(saved_path.read_text(encoding="utf-8"))
     saved_titles = [
@@ -803,6 +897,8 @@ def test_original_raw_run_is_saved_before_verify_and_curator_gets_accepted_run(
     assert saved_titles == ["Story 1", "Story 2"]
     curated_run = mocks.curate.call_args.args[0]
     assert _titles(curated_run) == ["Story 1"]
+    assert rejected.title not in _titles(curated_run)
+    assert mocks.load_history.call_count == 1
     assert original_run == original_snapshot
     assert _titles(original_run) == ["Story 1", "Story 2"]
     run_record = mocks.save_run_record.call_args.args[0]
@@ -998,7 +1094,9 @@ def test_curator_failure_retains_verification_and_current_telemetry(
             )
         return mocks.run
 
-    def fail_curate(*_args: object, client: object) -> list[CuratedItem]:
+    def fail_curate(
+        *_args: object, client: object, **_kwargs: object
+    ) -> list[CuratedItem]:
         try:
             client.responses.parse(model=CONFIG.openai_model)
         except RuntimeError as exc:
@@ -1059,7 +1157,9 @@ def test_report_failure_retains_prior_summaries_and_failed_call(
             )
         return mocks.run
 
-    def curate(*_args: object, client: object) -> list[CuratedItem]:
+    def curate(
+        *_args: object, client: object, **_kwargs: object
+    ) -> list[CuratedItem]:
         client.responses.parse(model=CONFIG.openai_model)
         return mocks.curated
 
@@ -1243,9 +1343,15 @@ def _titles(research_run: ResearchRun) -> list[str]:
 
 
 def curation_assessment(
-    candidate_id: str, *, duplicate_of: str | None = None, score: int = 4,
+    candidate_id: str,
+    *,
+    duplicate_of: str | None = None,
+    score: int = 4,
+    historical_status: str | None = None,
+    historical_match_id: str | None = None,
+    material_change_refs: list[dict[str, object]] | None = None,
 ) -> dict:
-    return {
+    payload = {
         "candidate_id": candidate_id,
         "impact": score,
         "technical_significance": score,
@@ -1253,6 +1359,13 @@ def curation_assessment(
         "student_relevance": score,
         "semantic_duplicate_of": duplicate_of,
     }
+    if historical_status is not None:
+        payload.update(
+            historical_status=historical_status,
+            historical_match_id=historical_match_id,
+            material_change_refs=material_change_refs or [],
+        )
+    return payload
 
 
 def report_content() -> dict:
@@ -1401,7 +1514,9 @@ def test_real_fresh_pipeline_requires_provenance_and_preserves_eight_call_budget
         assert call_.kwargs["max_tool_calls"] == 4
         assert call_.kwargs["text_format"] is CategoryResearchResult
     assert all("tools" not in call_.kwargs for call_ in calls[6:])
-    assert calls[6].kwargs["text_format"].__name__ == "_CurationResponse"
+    assert calls[6].kwargs["text_format"].__name__ == (
+        "_NoHistoryCurationResponse"
+    )
     assert all(call_.kwargs["model"] == config.openai_model for call_ in calls)
     report_prompt = calls[7].kwargs["input"]
     assert "fact_support" not in report_prompt
@@ -1409,7 +1524,7 @@ def test_real_fresh_pipeline_requires_provenance_and_preserves_eight_call_budget
     assert calls[7].kwargs["text_format"] is report_module.ReportContent
     record = saved_record(tmp_path)
     assert record.schema_version == 1
-    assert record.application_version == main_module.__version__ == "0.4.0"
+    assert record.application_version == main_module.__version__ == "0.5.0"
     assert record.status == "success" and record.error_stage is None
     assert record.max_retries == 0 and record.timeout_seconds == 12.5
     assert record.researched_category_count == 6
@@ -1608,7 +1723,9 @@ def test_legacy_json_standalone_compatibility_remains_but_fresh_main_is_strict(
         RESEARCH_CATEGORIES
     )
     assert record.verification_warning_count == 0  # No compatibility fallback.
-    assert "No stories passed" in record.report_path.read_text(encoding="utf-8")
+    assert "No candidates were available for curation" in (
+        record.report_path.read_text(encoding="utf-8")
+    )
     assert record.raw_research_path.is_file()
 
 
@@ -1653,7 +1770,11 @@ def test_real_empty_pipeline_counts_are_truthful_without_report_request(
     assert record.api_totals.total_tokens == 15 * expected_calls
     assert saved_raw(tmp_path) == run
     assert record.raw_research_path.is_file() and record.report_path.is_file()
-    assert "No stories passed" in record.report_path.read_text(encoding="utf-8")
+    markdown = record.report_path.read_text(encoding="utf-8")
+    if empty_kind in {"no_research", "all_rejected"}:
+        assert "No candidates were available for curation" in markdown
+    else:
+        assert "Candidates were assessed, but no story passed" in markdown
 
 
 @pytest.mark.parametrize("missing_index", [0, 6, 7])
@@ -1715,7 +1836,7 @@ def test_real_strict_pipeline_failures_preserve_partial_paths_counts_and_calls(
 
     record = saved_record(tmp_path)
     assert record.status == "failed" and record.error_stage == expected_stage
-    assert record.schema_version == 1 and record.application_version == "0.4.0"
+    assert record.schema_version == 1 and record.application_version == "0.5.0"
     assert record.api_totals.logical_call_count == mocks.parse.call_count == call_count
     assert record.verification_accepted_count == accepted
     assert record.curated_item_count == curated
@@ -1869,3 +1990,443 @@ def test_backwards_run_clock_preserves_primary_outcome_without_false_record(
     else:
         assert "Interrupted by user" in output.err
         assert not (tmp_path / "reports").exists()
+
+
+# Version 0.5 Phase 3: Main history integration and path-specific telemetry.
+
+
+@pytest.mark.parametrize("state", ["complete", "partial", "unavailable"])
+def test_main_loads_history_once_and_passes_exact_result_to_curate(
+    state: str,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    mocks = install_pipeline(monkeypatch, tmp_path)
+    monkeypatch.setattr(
+        main_module, "get_default_date_range", Mock(return_value=DATE_RANGE)
+    )
+    story = historical_story(make_item(1))
+    history = make_history_result(
+        state,
+        *(story,) if state != "unavailable" else (),
+        skipped_count=1 if state == "partial" else 0,
+    )
+    mocks.load_history.return_value = history
+
+    assert main_module.main([]) == 0
+
+    mocks.load_history.assert_called_once_with(
+        DATE_RANGE,
+        runs_dir=tmp_path / "runs",
+        raw_dir=tmp_path / "raw",
+        reports_dir=tmp_path / "reports",
+    )
+    assert mocks.curate.call_args.kwargs["history"] is history
+    run_record = mocks.save_run_record.call_args.args[0]
+    assert run_record.history.load_state == state
+    assert run_record.history.usable_run_count == history.runs_loaded
+    assert run_record.history.reconstructed_story_count == len(history.stories)
+    assert run_record.history.skipped_entry_count == history.skipped_count
+    warning = capsys.readouterr().err
+    if state == "partial":
+        assert "Local history is partial" in warning
+        assert "test_history_gap" in warning
+        assert "Prior story" not in warning
+    else:
+        assert "Local history" not in warning
+
+
+@pytest.mark.parametrize(
+    ("state", "expected_status", "expected_text"),
+    [
+        (
+            "complete",
+            "new",
+            "New within the usable local report history loaded for this run",
+        ),
+        (
+            "partial",
+            "uncertain",
+            "Continuity could not be reliably established",
+        ),
+        ("unavailable", None, None),
+    ],
+)
+def test_real_pipeline_applies_history_state_when_no_candidate_matches(
+    state: str,
+    expected_status: str | None,
+    expected_text: str | None,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    current = make_item(1)
+    unrelated_current = make_item(2)
+    prior = historical_story(
+        unrelated_current,
+        title="Unrelated accelerator architecture",
+    )
+    mocks = install_responses_pipeline(
+        monkeypatch,
+        tmp_path,
+        make_research_run(current),
+        assessments=[curation_assessment("candidate_001")],
+    )
+    history = make_history_result(
+        state,
+        *(prior,) if state != "unavailable" else (),
+        skipped_count=1 if state == "partial" else 0,
+    )
+    monkeypatch.setattr(main_module, "load_history", Mock(return_value=history))
+
+    assert run_fresh_main() == 0
+
+    record = saved_record(tmp_path)
+    markdown = record.report_path.read_text(encoding="utf-8")
+    assert record.api_totals.logical_call_count == mocks.parse.call_count == 8
+    if expected_status == "new":
+        assert record.history.matched_current_candidate_count == 0
+        assert record.history.validated_status_counts.new == 1
+    elif expected_status == "uncertain":
+        assert record.history.matched_current_candidate_count == 0
+        assert record.history.validated_status_counts.uncertain == 1
+    else:
+        assert record.history.matched_current_candidate_count is None
+        assert record.history.validated_status_counts is None
+    if expected_text is None:
+        assert "#### Historical continuity" not in markdown
+    else:
+        assert expected_text in markdown
+
+
+def test_history_loader_unexpected_error_is_not_silently_downgraded(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    mocks = install_pipeline(monkeypatch, tmp_path)
+    monkeypatch.setattr(
+        main_module, "get_default_date_range", Mock(return_value=DATE_RANGE)
+    )
+    mocks.load_history.side_effect = RuntimeError("unexpected history bug")
+
+    with pytest.raises(RuntimeError, match="unexpected history bug"):
+        main_module.main([])
+
+    mocks.load_history.assert_called_once()
+    mocks.curate.assert_not_called()
+    mocks.generate.assert_not_called()
+    mocks.save_run_record.assert_not_called()
+
+
+def test_history_is_not_loaded_when_verify_fails(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    mocks = install_pipeline(monkeypatch, tmp_path)
+    monkeypatch.setattr(
+        main_module, "get_default_date_range", Mock(return_value=DATE_RANGE)
+    )
+    monkeypatch.setattr(
+        main_module,
+        "verify_research_run",
+        Mock(side_effect=VerificationError("verification failed")),
+    )
+
+    assert main_module.main([]) == 1
+
+    mocks.load_history.assert_not_called()
+    record = mocks.save_run_record.call_args.args[0]
+    assert record.history is None
+
+
+def test_curate_statistics_are_captured_without_reconstructing_in_main(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    mocks = install_pipeline(monkeypatch, tmp_path)
+    monkeypatch.setattr(
+        main_module, "get_default_date_range", Mock(return_value=DATE_RANGE)
+    )
+    history = make_history_result("complete", historical_story(make_item(1)))
+    mocks.load_history.return_value = history
+
+    def curate_with_statistics(
+        *_args: object,
+        statistics: object,
+        **_kwargs: object,
+    ) -> list[CuratedItem]:
+        statistics.prepared_candidate_count = 5
+        statistics.matched_current_candidate_count = 2
+        statistics.validated_status_counts = {
+            "NEW": 2,
+            "FOLLOW_UP": 1,
+            "REPEAT": 1,
+            "UNCERTAIN": 1,
+        }
+        statistics.repeats_suppressed = 1
+        statistics.selected_follow_up_count = 1
+        return mocks.curated
+
+    mocks.curate.side_effect = curate_with_statistics
+
+    assert main_module.main([]) == 0
+
+    summary = mocks.save_run_record.call_args.args[0].history
+    assert summary.prepared_candidate_count == 5
+    assert summary.matched_current_candidate_count == 2
+    assert summary.validated_status_counts.model_dump() == {
+        "new": 2,
+        "follow_up": 1,
+        "repeat": 1,
+        "uncertain": 1,
+    }
+    assert summary.repeats_suppressed == 1
+    assert summary.selected_follow_up_count == 1
+    # Main consumed the collector; it did not invoke Curate or retrieval again.
+    assert mocks.curate.call_count == 1
+    assert mocks.load_history.call_count == 1
+
+
+def test_all_repeat_pipeline_uses_seven_calls_and_truthful_empty_report(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    current = make_item(1)
+    prior = historical_story(current, title="Story 1 prior coverage")
+    mocks = install_responses_pipeline(
+        monkeypatch,
+        tmp_path,
+        make_research_run(current),
+        assessments=[
+            curation_assessment(
+                "candidate_001",
+                historical_status="REPEAT",
+                historical_match_id=prior.history_id,
+            )
+        ],
+    )
+    history = make_history_result("complete", prior)
+    loader = Mock(return_value=history)
+    monkeypatch.setattr(main_module, "load_history", loader)
+
+    assert run_fresh_main() == 0
+
+    record = saved_record(tmp_path)
+    assert record.api_totals.logical_call_count == mocks.parse.call_count == 7
+    assert [call.stage for call in record.api_calls] == ["research"] * 6 + [
+        "curate"
+    ]
+    assert record.curated_item_count == 0
+    assert record.history.prepared_candidate_count == 1
+    assert record.history.matched_current_candidate_count == 1
+    assert record.history.validated_status_counts.repeat == 1
+    assert record.history.repeats_suppressed == 1
+    assert record.history.selected_follow_up_count == 0
+    markdown = record.report_path.read_text(encoding="utf-8")
+    assert "All assessed candidates repeated previously covered events" in markdown
+    assert "Candidates were assessed, but no story passed" not in markdown
+    assert all(call.stage != "report" for call in record.api_calls)
+    loader.assert_called_once()
+
+
+def test_mixed_repeat_and_low_score_nonrepeat_uses_general_empty_message(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    repeated, low_score = make_item(1), make_item(2)
+    prior_repeat = historical_story(repeated, title="Prior repeated event")
+    prior_new = historical_story(
+        low_score,
+        history_id="history_2026-08-23_to_2026-08-29_story_002",
+        title="Related but distinct prior event",
+        position=2,
+    )
+    mocks = install_responses_pipeline(
+        monkeypatch,
+        tmp_path,
+        make_research_run(repeated, low_score),
+        assessments=[
+            curation_assessment(
+                "candidate_001",
+                historical_status="REPEAT",
+                historical_match_id=prior_repeat.history_id,
+            ),
+            curation_assessment(
+                "candidate_002",
+                score=3,
+                historical_status="NEW",
+            ),
+        ],
+    )
+    monkeypatch.setattr(
+        main_module,
+        "load_history",
+        Mock(return_value=make_history_result("complete", prior_repeat, prior_new)),
+    )
+
+    assert run_fresh_main() == 0
+
+    record = saved_record(tmp_path)
+    assert record.api_totals.logical_call_count == mocks.parse.call_count == 7
+    assert record.history.validated_status_counts.repeat == 1
+    assert record.history.validated_status_counts.new == 1
+    assert record.history.repeats_suppressed == 1
+    markdown = record.report_path.read_text(encoding="utf-8")
+    assert "Candidates were assessed, but no story passed" in markdown
+    assert "All assessed candidates repeated" not in markdown
+
+
+def test_genuine_follow_up_survives_pipeline_with_eight_calls(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    current = make_item(1)
+    current.title = "Model X API reaches general availability"
+    current.summary = "Model X API is now generally available."
+    prior = historical_story(current, title="Model X is announced")
+    mocks = install_responses_pipeline(
+        monkeypatch,
+        tmp_path,
+        make_research_run(current),
+        assessments=[
+            curation_assessment(
+                "candidate_001",
+                historical_status="FOLLOW_UP",
+                historical_match_id=prior.history_id,
+                material_change_refs=[
+                    {"field": "summary", "technical_detail_index": None}
+                ],
+            )
+        ],
+    )
+    monkeypatch.setattr(
+        main_module,
+        "load_history",
+        Mock(return_value=make_history_result("complete", prior)),
+    )
+
+    assert run_fresh_main() == 0
+
+    record = saved_record(tmp_path)
+    assert record.api_totals.logical_call_count == mocks.parse.call_count == 8
+    assert record.history.validated_status_counts.follow_up == 1
+    assert record.history.repeats_suppressed == 0
+    assert record.history.selected_follow_up_count == 1
+    report_prompt = mocks.parse.call_args_list[7].kwargs["input"]
+    assert prior.history_id not in report_prompt
+    assert prior.item.title not in report_prompt
+    markdown = record.report_path.read_text(encoding="utf-8")
+    assert "Follow-up to a previously reported development" in markdown
+    assert current.summary in markdown
+    assert prior.item.title in markdown
+
+
+def test_interruption_retains_only_history_statistics_known_so_far(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    mocks = install_pipeline(monkeypatch, tmp_path)
+    monkeypatch.setattr(
+        main_module, "get_default_date_range", Mock(return_value=DATE_RANGE)
+    )
+    history = make_history_result("complete", historical_story(make_item(1)))
+    mocks.load_history.return_value = history
+
+    def interrupt_curate(
+        *_args: object,
+        statistics: object,
+        **_kwargs: object,
+    ) -> list[CuratedItem]:
+        statistics.prepared_candidate_count = 2
+        statistics.matched_current_candidate_count = 1
+        raise KeyboardInterrupt
+
+    mocks.curate.side_effect = interrupt_curate
+
+    assert main_module.main([]) == 130
+
+    record = mocks.save_run_record.call_args.args[0]
+    assert record.status == "failed"
+    assert record.history.prepared_candidate_count == 2
+    assert record.history.matched_current_candidate_count == 1
+    assert record.history.validated_status_counts is None
+    assert record.history.repeats_suppressed is None
+    assert record.history.selected_follow_up_count is None
+
+
+def test_invalid_curate_output_records_no_successful_classification_totals(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    current = make_item(1)
+    prior = historical_story(current)
+    mocks = install_responses_pipeline(
+        monkeypatch,
+        tmp_path,
+        make_research_run(current),
+        assessments=[
+            curation_assessment(
+                "candidate_001",
+                historical_status="REPEAT",
+                historical_match_id="history_not_supplied",
+            )
+        ],
+    )
+    monkeypatch.setattr(
+        main_module,
+        "load_history",
+        Mock(return_value=make_history_result("complete", prior)),
+    )
+
+    assert run_fresh_main() == 1
+
+    record = saved_record(tmp_path)
+    assert record.status == "failed" and record.error_stage == "curate"
+    assert record.api_totals.logical_call_count == mocks.parse.call_count == 7
+    assert record.history.prepared_candidate_count == 1
+    assert record.history.matched_current_candidate_count == 1
+    assert record.history.validated_status_counts is None
+    assert record.history.repeats_suppressed is None
+    assert record.history.selected_follow_up_count is None
+
+
+def test_report_failure_retains_validated_history_statistics(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    current = make_item(1)
+    current.title = "Model X API reaches general availability"
+    prior = historical_story(current, title="Model X announced")
+    malformed_content = report_content()
+    malformed_content["story_explanations"][0]["story_id"] = "story_999"
+    mocks = install_responses_pipeline(
+        monkeypatch,
+        tmp_path,
+        make_research_run(current),
+        assessments=[
+            curation_assessment(
+                "candidate_001",
+                historical_status="FOLLOW_UP",
+                historical_match_id=prior.history_id,
+                material_change_refs=[
+                    {"field": "summary", "technical_detail_index": None}
+                ],
+            )
+        ],
+        content=malformed_content,
+    )
+    monkeypatch.setattr(
+        main_module,
+        "load_history",
+        Mock(return_value=make_history_result("complete", prior)),
+    )
+
+    assert run_fresh_main() == 1
+
+    record = saved_record(tmp_path)
+    assert record.status == "failed" and record.error_stage == "report"
+    assert record.api_totals.logical_call_count == mocks.parse.call_count == 8
+    assert record.history.validated_status_counts.follow_up == 1
+    assert record.history.repeats_suppressed == 0
+    assert record.history.selected_follow_up_count == 1
+    assert record.report_path is None

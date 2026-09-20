@@ -8,7 +8,11 @@ import sys
 
 from ai_weekly_agent import __version__
 from ai_weekly_agent.config import AppConfig, create_openai_client, load_config
-from ai_weekly_agent.curate import CuratorError, curate_research_run
+from ai_weekly_agent.curate import (
+    CurationStatistics,
+    CuratorError,
+    curate_research_run,
+)
 from ai_weekly_agent.dates import (
     get_date_range_for_days,
     get_default_date_range,
@@ -16,7 +20,13 @@ from ai_weekly_agent.dates import (
     weekly_report_filename,
 )
 from ai_weekly_agent.models import DateRange, ResearchRun, VerificationResult
-from ai_weekly_agent.report import ReportError, generate_report, save_report
+from ai_weekly_agent.history import HistoryLoadResult, load_history
+from ai_weekly_agent.report import (
+    EmptyReportReason,
+    ReportError,
+    generate_report,
+    save_report,
+)
 from ai_weekly_agent.research import (
     ResearchError,
     research_all_categories,
@@ -26,6 +36,8 @@ from ai_weekly_agent.telemetry import (
     RunErrorStage,
     RunRecord,
     RunStatus,
+    HistoricalStatusCounts,
+    HistoryTelemetrySummary,
     TelemetryRecorder,
     observe_openai_client,
     run_record_filename,
@@ -130,6 +142,84 @@ def _utc_now() -> datetime:
     return datetime.now(UTC)
 
 
+def _history_telemetry(
+    history_result: HistoryLoadResult | None,
+    statistics: CurationStatistics | None,
+) -> HistoryTelemetrySummary | None:
+    if history_result is None:
+        return None
+
+    status_counts = None
+    if statistics is not None and statistics.validated_status_counts is not None:
+        counts = statistics.validated_status_counts
+        status_counts = HistoricalStatusCounts(
+            new=counts["NEW"],
+            follow_up=counts["FOLLOW_UP"],
+            repeat=counts["REPEAT"],
+            uncertain=counts["UNCERTAIN"],
+        )
+
+    return HistoryTelemetrySummary(
+        load_state=history_result.state,
+        usable_run_count=history_result.runs_loaded,
+        reconstructed_story_count=len(history_result.stories),
+        skipped_entry_count=history_result.skipped_count,
+        prepared_candidate_count=(
+            statistics.prepared_candidate_count
+            if statistics is not None
+            else None
+        ),
+        matched_current_candidate_count=(
+            statistics.matched_current_candidate_count
+            if statistics is not None
+            else None
+        ),
+        validated_status_counts=status_counts,
+        repeats_suppressed=(
+            statistics.repeats_suppressed
+            if statistics is not None
+            else None
+        ),
+        selected_follow_up_count=(
+            statistics.selected_follow_up_count
+            if statistics is not None
+            else None
+        ),
+    )
+
+
+def _warn_about_history(history_result: HistoryLoadResult) -> None:
+    if not history_result.diagnostics:
+        return
+    diagnostic_codes = ", ".join(
+        sorted({diagnostic.code for diagnostic in history_result.diagnostics})
+    )
+    print(
+        "Warning: Local history is "
+        f"{history_result.state}; skipped {history_result.skipped_count} "
+        f"history entries ({diagnostic_codes}).",
+        file=sys.stderr,
+    )
+
+
+def _empty_report_reason(
+    statistics: CurationStatistics,
+) -> EmptyReportReason:
+    prepared = statistics.prepared_candidate_count
+    if prepared == 0:
+        return "no_prepared_candidates"
+    counts = statistics.validated_status_counts
+    if (
+        prepared is not None
+        and prepared > 0
+        and counts is not None
+        and sum(counts.values()) == prepared
+        and counts["REPEAT"] == prepared
+    ):
+        return "all_repeats"
+    return "no_selection"
+
+
 def _build_run_record(
     *,
     date_range: DateRange,
@@ -141,6 +231,8 @@ def _build_run_record(
     research_run: ResearchRun | None,
     verification_result: VerificationResult | None,
     curated_item_count: int | None,
+    history_result: HistoryLoadResult | None,
+    curation_statistics: CurationStatistics | None,
     raw_research_path: Path | None,
     report_path: Path | None,
 ) -> RunRecord | None:
@@ -196,6 +288,7 @@ def _build_run_record(
             else None
         ),
         curated_item_count=curated_item_count,
+        history=_history_telemetry(history_result, curation_statistics),
         raw_research_path=raw_research_path,
         report_path=report_path,
         run_record_path=RUNS_DIR / run_record_filename(date_range),
@@ -255,6 +348,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     research_run: ResearchRun | None = None
     verification_result: VerificationResult | None = None
     curated_item_count: int | None = None
+    history_result: HistoryLoadResult | None = None
+    curation_statistics: CurationStatistics | None = None
     raw_path: Path | None = None
     report_path: Path | None = None
     current_stage: RunErrorStage = "research"
@@ -302,25 +397,45 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
 
         current_stage = "curate"
+        print("Loading local report history...")
+        history_result = load_history(
+            date_range,
+            runs_dir=RUNS_DIR,
+            raw_dir=RAW_DATA_DIR,
+            reports_dir=REPORTS_DIR,
+        )
+        _warn_about_history(history_result)
+
         print("[4/5] Curating candidate stories...")
         curate_client = observe_openai_client(base_client, recorder, "curate")
+        curation_statistics = CurationStatistics()
         curated_items = curate_research_run(
             verification_result.accepted_run,
             config,
             client=curate_client,
+            history=history_result,
+            statistics=curation_statistics,
         )
         curated_item_count = len(curated_items)
         print(f"Curated stories: {len(curated_items)}")
 
         current_stage = "report"
         print("[5/5] Generating weekly report...")
-        report_client = observe_openai_client(base_client, recorder, "report")
-        markdown = generate_report(
-            date_range,
-            curated_items,
-            config,
-            client=report_client,
-        )
+        if curated_items:
+            report_client = observe_openai_client(base_client, recorder, "report")
+            markdown = generate_report(
+                date_range,
+                curated_items,
+                config,
+                client=report_client,
+            )
+        else:
+            markdown = generate_report(
+                date_range,
+                curated_items,
+                config,
+                empty_reason=_empty_report_reason(curation_statistics),
+            )
         current_stage = "save"
         report_path = save_report(
             date_range,
@@ -347,6 +462,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             research_run=research_run,
             verification_result=verification_result,
             curated_item_count=curated_item_count,
+            history_result=history_result,
+            curation_statistics=curation_statistics,
             raw_research_path=raw_path,
             report_path=report_path,
         )
@@ -364,6 +481,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             research_run=research_run,
             verification_result=verification_result,
             curated_item_count=curated_item_count,
+            history_result=history_result,
+            curation_statistics=curation_statistics,
             raw_research_path=raw_path,
             report_path=report_path,
         )
@@ -381,6 +500,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         research_run=research_run,
         verification_result=verification_result,
         curated_item_count=curated_item_count,
+        history_result=history_result,
+        curation_statistics=curation_statistics,
         raw_research_path=raw_path,
         report_path=report_path,
     )

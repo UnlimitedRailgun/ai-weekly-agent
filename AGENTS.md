@@ -2,12 +2,14 @@
 
 ## Product Goal and Audience
 
-This repository contains Version 0.4.0 of an AI & Computer Engineering Weekly
-Research Agent. Its target reader is a university Computer Engineering student
-who is relatively new to the AI industry. The agent must produce a reliable,
-approachable weekly overview without assuming deep industry knowledge, while
-retaining enough technical detail to be useful. Keep the architecture small,
-synchronous, explicit, and easy for a student to understand and debug.
+This repository's released baseline is Version 0.4.0 of an AI & Computer
+Engineering Weekly Research Agent. The current worktree is locally prepared as
+Version 0.5.0 with historical awareness but has not been published. Its target
+reader is a university Computer Engineering student who is relatively new to
+the AI industry. The agent must produce a reliable, approachable weekly overview
+without assuming deep industry knowledge, while retaining enough technical
+detail to be useful. Keep the architecture small, synchronous, explicit, and
+easy for a student to understand and debug.
 
 Each run should research important developments published or announced during the previous seven days in these areas:
 
@@ -24,24 +26,28 @@ Prioritize significance over volume. The report is a curated overview, not an ex
 
 Keep the implementation intentionally simple and use one linear pipeline:
 
-`Research x6 -> save original raw ResearchRun -> Verify -> Curate -> Grounded Report -> local consistency validation -> deterministic Markdown -> save report -> RunRecord`
+`Research x6 -> save original raw ResearchRun -> Verify -> load local history -> Curate -> Grounded Report -> local consistency validation -> deterministic Markdown -> save report -> RunRecord`
 
 The stages have distinct responsibilities:
 
 1. **Research:** Find candidate developments from the defined seven-day window with `web_search` through the OpenAI Responses API. Capture source URLs, evidence-role classifications, and enough source metadata to verify every candidate.
 2. **Raw audit checkpoint:** Persist the original validated `ResearchRun` under `data/raw/` before filtering. Never replace this artifact with verifier output; it must retain items that Verify later rejects.
 3. **Verify:** Apply deterministic, local evidence and structure checks without an API or network call. Produce a separate accepted `ResearchRun`; do not mutate the original. Only accepted items proceed to Curator.
-4. **Curate:** Remove duplicates and select accepted developments based on relevance, technical importance, source quality, and usefulness to the target reader.
-5. **Grounded Report:** In one non-search Responses API call for a non-empty selection, generate only interpretation and beginner guidance: `story_id`, `what_it_is`, `why_it_matters`, `student_takeaway`, and optional general concept explanations. Empty selections retain the deterministic zero-call report path.
-6. **Consistency and rendering:** Validate story and concept IDs locally, reject model-generated URLs, and render authoritative upstream facts and sources into deterministic Markdown. Do not delegate factual fields back to the Report model.
-7. **Save locally:** Completed weekly reports belong under `reports/`. Operational RunRecords belong under `data/runs/` and summarize stage counts, logical API-call telemetry, reliability settings, outcomes, and artifact paths without storing model content or secrets.
+4. **Historical load:** Reconstruct previously published stories read-only from successful local RunRecords plus their canonical raw and report artifacts. Treat degraded history conservatively; never restore an item rejected by current Verify.
+5. **Curate:** After existing hard filters and exact current-run deduplication, retrieve at most three historical candidates per current item, assess continuity inside the existing single Curate call when needed, remove `REPEAT`, and select accepted developments based on relevance, technical importance, source quality, and usefulness to the target reader.
+6. **Grounded Report:** In one non-search Responses API call for a non-empty selection, generate only interpretation and beginner guidance: `story_id`, `what_it_is`, `why_it_matters`, `student_takeaway`, and optional general concept explanations. Empty selections retain the deterministic zero-call report path.
+7. **Consistency and rendering:** Validate story and concept IDs locally, reject model-generated URLs, and render authoritative upstream facts, sources, and validated historical context into deterministic Markdown. Do not delegate factual or historical fields back to the Report model.
+8. **Save locally:** Completed weekly reports belong under `reports/`. Operational RunRecords belong under `data/runs/` and summarize stage counts, logical API-call telemetry, reliability settings, outcomes, artifact paths, and content-free history counts without storing model content or secrets.
 
 Main must create exactly one configured base OpenAI client per normal run, then
 inject category-aware observed views into the six sequential Research calls and
 stage-labelled observed views into Curator and Report. One telemetry recorder
 spans the entire run. Direct standalone calls to those stages may retain their
 fallback client creation. A normal successful non-empty run has eight logical
-calls: six Research, one Curate, and one Report. Telemetry records logical
+calls: six Research, one Curate, and one Report. An assessed empty selection
+uses seven calls, and no prepared Curate candidates uses six. Historical loading
+and retrieval are local and add no call. These logical counts do not by
+themselves establish token usage or monetary cost. Telemetry records logical
 `responses.parse()` calls, not hidden SDK HTTP retries. Research records should
 carry their canonical `research_category`; Curate and Report records must keep
 that field null. Token totals are complete only when every observed call
@@ -124,6 +130,86 @@ duplicate resolution remain offline-tested, not live-proven by that sample.
 Keep unknown-date, mutable-page, and single-source limitations explicit; no
 additional live run or independent external fact-checking is implied.
 
+### Version 0.5 Historical Awareness (Local Release Preparation; Not Published)
+
+Historical coverage requires a successful schema-v1 RunRecord, its canonical
+raw `ResearchRun`, and its canonical Markdown report. Reconstruct only stories
+that occur in the report; raw-only and unselected candidates are not coverage.
+Require matching report/raw category, organization, date, normalized title,
+normalized summary, exact rendered technical-detail and benchmark sections,
+and complete normalized source-URL set. A unique mutable or generic URL is not
+sufficient identity. Keep reconciliation conservative and unique; do not add
+fuzzy Markdown parsing or a new snapshot artifact.
+
+Load at most the four most recent usable prior runs. This is a run limit, not a
+claim of four complete calendar weeks. Exclude the current range and any run
+ending on or after the current end date; an earlier-ending overlap may remain
+eligible. Enforce configured artifact roots and expected date-based paths.
+Classify usable history as `complete` or `partial`; use `unavailable` when no
+stories are safely reconstructed. Expected artifact problems degrade with
+concise diagnostics. Do not catch unexpected programming errors as missing
+history, mutate historical artifacts, fetch historical pages, or add a history
+configuration/CLI switch.
+
+Candidate retrieval is deterministic and occurs inside Curate only after current
+hard filtering and exact deduplication. It is capped at three historical
+candidates per current item and uses explainable shared-URL, guarded exact-title,
+or organization-plus-distinctive-title-term signals. Retrieval is permissive and
+does not establish coverage, duplication, or semantic truth. Bounded local
+retrieval can miss related events.
+
+When complete history has no match, assign local `NEW`; this means new within
+the usable local history, not global novelty. When partial history has no match,
+assign local `UNCERTAIN`. Unavailable history preserves the no-history contract.
+For retrieved candidates, the existing one-call Curate assessment returns
+`NEW`, `FOLLOW_UP`, `REPEAT`, or `UNCERTAIN` under strict per-current-item ID and
+shape validation. `FOLLOW_UP` must reference exact current verified facts by
+summary, technical-detail index, or benchmark field. Those references support
+comparison but do not independently prove a material semantic change. Remove
+`REPEAT` before semantic deduplication, thresholding, ordering, diversity, and
+the item cap.
+
+Strict Verify preserves accepted title, category, organization, date, summary,
+technical details, and benchmark fields; it only filters/normalizes Sources and
+does not mutate the raw audit artifact. Deterministic Report rendering publishes
+those accepted factual fields directly. Historical Curate payloads contain the
+reconciled prior factual fields but exclude source URLs, Report interpretation,
+artifact paths, diagnostics, and historical model prose. Raw-only or rejected
+facts must never be introduced as evidence of prior coverage.
+
+The Report Structured Output contract remains unchanged. Never serialize an
+entire `CuratedItem` into its prompt: explicitly exclude `historical_context`,
+prior identity, history diagnostics, source URLs, and material-change facts.
+Render validated `NEW`, `FOLLOW_UP`, and `UNCERTAIN` context locally. `REPEAT`
+must not reach normal rendering. Keep no-history callers compatible.
+
+The optional schema-v1 RunRecord history summary is content-free: load state,
+usable runs, reconstructed stories, combined skipped RunRecord/artifact/story
+entries, prepared and matched current candidates, validated status totals,
+repeats suppressed, and selected follow-ups. Zero means a completed stage saw
+none; null means not executed or not established. Invalid assessments, failures,
+and interruptions may retain only counts established before they occurred.
+Older schema-v1 records without history must remain readable. The released v0.4
+Pydantic reader's default extra-field behavior accepts the additive field, but
+do not generalize that result to untested external consumers.
+
+History is not current evidence verification or independent fact-checking.
+Offline mocked classifications validate contracts, not live-model semantic
+accuracy. Controlled Curate-only validation found that one ambiguous synthetic
+case was classified as `REPEAT` and suppressed in both history-enabled runs,
+including after the reviewed prompt clarification, despite the frozen and
+offline-adjudicated `UNCERTAIN` expectation. The response was structurally
+valid, and the local validator does not prove semantic truth. At its observed
+score of 1.00, changing only the status would not have selected it; false
+suppression of useful items on other inputs remains possible and unmeasured,
+and low scores are not a general mitigation. The user accepted this documented
+risk specifically as a known limitation for v0.5.0 release preparation; the
+semantic issue remains unresolved. The live evaluations selected no items, so
+selected historical-context rendering and a full v0.5 weekly pipeline remain
+untested live. Publication is not authorized. Do not claim the issue is fixed or
+that its semantic evaluation passed, and do not start additional live validation
+without separate authorization.
+
 ## Technology Requirements
 
 Use:
@@ -166,6 +252,16 @@ Prefer small functions, explicit dependency injection, and explicit configuratio
 Use pytest; name files `test_*.py` and tests `test_<behavior>`. Tests must never make real OpenAI API calls or live web requests. Mock or fake the OpenAI client, Responses API results, `web_search` output, and other network boundaries so tests remain deterministic and consume no credentials or quota.
 
 Cover the main pipeline behavior as well as malformed or incomplete model responses, invalid structured data, empty research results, duplicate candidates, dates outside the seven-day window, missing or unsupported citations, retries, external-service failures, partial RunRecords, incomplete usage metadata, and filesystem errors. Test the raw-before-Verify audit invariant, that rejected items do not reach Curator, that unverified benchmark/specification claims are rejected or omitted, and that reports preserve upstream facts and source URLs. Keep regression coverage for the grounded Report response boundary, ordered Research category telemetry, category identity on failed Research calls, category-null Curate/Report records, the one-base-client invariant, and the eight-call normal pipeline. Add a regression test with every bug fix. No coverage threshold is configured yet; new features should exercise their main branches.
+
+For historical awareness, retain coverage for strict three-artifact
+reconciliation, raw-only exclusion, mutable-URL identity rejection, current and
+future window exclusion, earlier overlap, four-run and three-candidate caps,
+complete/partial/unavailable behavior, per-item history-ID validation, exact
+current fact references, collector reuse/reset, repeat suppression, Report
+prompt isolation, deterministic continuity rendering, null-versus-zero
+telemetry, failure/interruption state, path-specific 8/7/7/6 call budgets, and
+the production save/render/load round trip. Tests must not describe mocked
+continuity classifications as semantic accuracy.
 
 ## Security and Configuration
 

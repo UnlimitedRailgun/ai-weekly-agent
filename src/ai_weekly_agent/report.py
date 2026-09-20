@@ -6,7 +6,7 @@ import os
 from pathlib import Path
 import re
 import tempfile
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 from urllib.parse import urlsplit, urlunsplit
 
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints, ValidationError
@@ -44,6 +44,25 @@ _SOURCE_TYPE_ORDER = {
     "university": 3,
     "benchmark": 4,
     "secondary": 5,
+}
+EmptyReportReason = Literal[
+    "no_prepared_candidates",
+    "no_selection",
+    "all_repeats",
+]
+_EMPTY_REPORT_MESSAGES: dict[EmptyReportReason, str] = {
+    "no_prepared_candidates": (
+        "No candidates were available for curation after deterministic "
+        "preparation."
+    ),
+    "no_selection": (
+        "Candidates were assessed, but no story passed the existing curation "
+        "and selection rules for this period."
+    ),
+    "all_repeats": (
+        "All assessed candidates repeated previously covered events, so no "
+        "stories were selected for this period."
+    ),
 }
 
 
@@ -87,11 +106,16 @@ def generate_report(
     config: AppConfig,
     *,
     client: Any | None = None,
+    empty_reason: EmptyReportReason | None = None,
 ) -> str:
     """Generate explanations once, then render the report deterministically."""
     items = list(curated_items)
     if not items:
-        return render_markdown(date_range, items)
+        return render_markdown(
+            date_range,
+            items,
+            empty_reason=empty_reason,
+        )
 
     model = _require_openai_configuration(config)
     prompt = _render_prompt(date_range, items)
@@ -126,6 +150,8 @@ def render_markdown(
     date_range: DateRange,
     curated_items: Sequence[CuratedItem],
     content: ReportContent | None = None,
+    *,
+    empty_reason: EmptyReportReason | None = None,
 ) -> str:
     """Render stable Markdown without accepting model-generated metadata."""
     items = list(curated_items)
@@ -152,7 +178,9 @@ def render_markdown(
 
     if not items:
         lines.append(
-            "No stories passed the curation threshold for this period."
+            _EMPTY_REPORT_MESSAGES[empty_reason]
+            if empty_reason is not None
+            else "No stories passed the curation threshold for this period."
         )
         return "\n".join(lines) + "\n"
 
@@ -190,10 +218,10 @@ def render_markdown(
                 "",
                 item.summary,
                 "",
-                "#### Key technical details",
-                "",
             ]
         )
+        lines.extend(_historical_context_lines(curated_item))
+        lines.extend(["#### Key technical details", ""])
         if item.technical_details:
             lines.extend(f"- {detail}" for detail in item.technical_details)
         else:
@@ -259,6 +287,85 @@ def render_markdown(
         )
 
     return "\n".join(lines) + "\n"
+
+
+def _historical_context_lines(curated_item: CuratedItem) -> list[str]:
+    context = curated_item.historical_context
+    if context is None:
+        return []
+    if context.status == "REPEAT":
+        raise ReportError("REPEAT historical context cannot be rendered")
+
+    lines = ["#### Historical continuity", ""]
+    if context.status == "NEW":
+        lines.extend(
+            [
+                "**Status:** New within the usable local report history loaded "
+                "for this run.",
+                "",
+                "This local classification does not establish global novelty.",
+                "",
+            ]
+        )
+        return lines
+
+    if context.status == "FOLLOW_UP":
+        prior_range = context.prior_report_date_range
+        if prior_range is None or context.prior_title is None:
+            raise ReportError("FOLLOW_UP historical context is incomplete")
+        lines.extend(
+            [
+                "**Status:** Follow-up to a previously reported development.",
+                "",
+                "**Prior report:** "
+                f"{prior_range.start.isoformat()} — "
+                f"{prior_range.end.isoformat()} — "
+                f"{_single_line(context.prior_title)}",
+                "",
+                "**Current development identified for comparison:**",
+                "",
+            ]
+        )
+        lines.extend(f"- {fact}" for fact in context.material_change_facts)
+        lines.extend(
+            [
+                "",
+                "The referenced current facts support comparison but do not "
+                "independently prove the semantic material-change judgment.",
+                "",
+            ]
+        )
+        return lines
+
+    lines.extend(
+        [
+            "**Status:** Historical continuity uncertain.",
+            "",
+        ]
+    )
+    if (
+        context.prior_report_date_range is not None
+        and context.prior_title is not None
+    ):
+        prior_range = context.prior_report_date_range
+        lines.extend(
+            [
+                "**Compared with prior report:** "
+                f"{prior_range.start.isoformat()} — "
+                f"{prior_range.end.isoformat()} — "
+                f"{_single_line(context.prior_title)}",
+                "",
+            ]
+        )
+    lines.extend(
+        [
+            "Continuity could not be reliably established from the available "
+            "local historical information. This does not mean current source "
+            "verification failed.",
+            "",
+        ]
+    )
+    return lines
 
 
 def save_report(

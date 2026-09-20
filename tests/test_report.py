@@ -6,7 +6,13 @@ import pytest
 
 import ai_weekly_agent.report as report_module
 from ai_weekly_agent.config import AppConfig
-from ai_weekly_agent.models import CuratedItem, DateRange, NewsItem, Source
+from ai_weekly_agent.models import (
+    CuratedItem,
+    DateRange,
+    HistoricalContext,
+    NewsItem,
+    Source,
+)
 from ai_weekly_agent.report import (
     NO_BENCHMARK_INFORMATION,
     ConceptExplanation,
@@ -50,6 +56,7 @@ def make_curated_item(
     benchmark_information: str | None = None,
     sources: list[Source] | None = None,
     final_score: float = 4.25,
+    historical_context: HistoricalContext | None = None,
 ) -> CuratedItem:
     return CuratedItem(
         item=NewsItem(
@@ -67,6 +74,7 @@ def make_curated_item(
             sources=sources or [make_source()],
         ),
         final_score=final_score,
+        historical_context=historical_context,
     )
 
 
@@ -337,6 +345,40 @@ def test_report_prompt_omits_metadata_the_model_must_not_restate() -> None:
     assert "Specific source" not in prompt
 
 
+def test_report_prompt_excludes_all_historical_context_fields() -> None:
+    context = HistoricalContext(
+        status="FOLLOW_UP",
+        historical_match_id="PRIVATE_HISTORY_ID",
+        prior_report_date_range=DateRange(
+            start=date(2026, 8, 16), end=date(2026, 8, 22)
+        ),
+        prior_title="PRIVATE PRIOR TITLE",
+        material_change_facts=["Technical detail for Current follow-up."],
+    )
+    item = make_curated_item(
+        "Current follow-up",
+        historical_context=context,
+    )
+
+    _, client = generate_with(
+        [item],
+        report_payload(explanation("story_001")),
+    )
+
+    prompt = client.responses.calls[0]["input"]
+    for forbidden in (
+        "historical_context",
+        "historical_status",
+        "historical_match_id",
+        "PRIVATE_HISTORY_ID",
+        "PRIVATE PRIOR TITLE",
+        "prior_report_date_range",
+        "material_change_facts",
+    ):
+        assert forbidden not in prompt
+    assert client.responses.calls[0]["text_format"] is ReportContent
+
+
 def test_source_urls_are_not_sent_to_the_model() -> None:
     _, client = generate_with(
         [make_curated_item()],
@@ -451,6 +493,149 @@ def test_story_order_follows_curated_item_order() -> None:
     )
 
     assert markdown.index("### 1. Zeta") < markdown.index("### 2. Alpha")
+
+
+def test_no_history_context_preserves_story_format_without_history_block() -> None:
+    item = make_curated_item("Legacy format story")
+
+    markdown, _ = generate_with(
+        [item], report_payload(explanation("story_001"))
+    )
+
+    assert "#### Historical continuity" not in markdown
+    assert "#### What happened?\n\n" + item.item.summary in markdown
+    assert "\n\n#### Key technical details" in markdown
+
+
+def test_new_follow_up_and_uncertain_render_deterministically() -> None:
+    prior_range = DateRange(
+        start=date(2026, 8, 16), end=date(2026, 8, 22)
+    )
+    exact_fact = "API GA is available with  two spaces and [qualified] access."
+    items = [
+        make_curated_item(
+            "Locally new story",
+            historical_context=HistoricalContext(status="NEW"),
+        ),
+        make_curated_item(
+            "Follow-up story",
+            technical_details=[exact_fact],
+            historical_context=HistoricalContext(
+                status="FOLLOW_UP",
+                historical_match_id="history_prior_story_001",
+                prior_report_date_range=prior_range,
+                prior_title="Prior title\nwith line break",
+                material_change_facts=[exact_fact],
+            ),
+        ),
+        make_curated_item(
+            "Uncertain story",
+            historical_context=HistoricalContext(
+                status="UNCERTAIN",
+                historical_match_id="history_prior_story_002",
+                prior_report_date_range=prior_range,
+                prior_title="Prior uncertain comparison",
+            ),
+        ),
+    ]
+    content = parsed_content(
+        explanation("story_001"),
+        explanation("story_002"),
+        explanation("story_003"),
+    )
+
+    first = render_markdown(DATE_RANGE, items, content)
+    second = render_markdown(DATE_RANGE, items, content)
+
+    assert first == second
+    assert first.count("#### Historical continuity") == 3
+    assert "New within the usable local report history loaded for this run" in first
+    assert "does not establish global novelty" in first
+    assert (
+        "**Prior report:** 2026-08-16 — 2026-08-22 — "
+        "Prior title with line break"
+    ) in first
+    assert f"- {exact_fact}" in first
+    assert "independently prove the semantic material-change judgment" in first
+    assert "Historical continuity uncertain" in first
+    assert "This does not mean current source verification failed" in first
+    assert "history_prior_story" not in first
+    assert "https://" in first  # Only the current story's authoritative sources.
+    assert "/home/" not in first
+
+
+def test_uncertain_without_match_does_not_invent_prior_identity() -> None:
+    item = make_curated_item(
+        historical_context=HistoricalContext(status="UNCERTAIN")
+    )
+
+    markdown, _ = generate_with(
+        [item], report_payload(explanation("story_001"))
+    )
+
+    section = markdown.split("#### Historical continuity\n\n", 1)[1].split(
+        "#### Key technical details", 1
+    )[0]
+    assert "Compared with prior report" not in section
+    assert "could not be reliably established" in section
+
+
+def test_repeat_context_is_defensively_rejected_by_renderer() -> None:
+    ordinary = make_curated_item()
+    repeat_context = HistoricalContext(
+        status="REPEAT",
+        historical_match_id="history_prior_story_001",
+        prior_report_date_range=DateRange(
+            start=date(2026, 8, 16), end=date(2026, 8, 22)
+        ),
+        prior_title="Prior story",
+    )
+    invalid = CuratedItem.model_construct(
+        item=ordinary.item,
+        final_score=ordinary.final_score,
+        historical_context=repeat_context,
+    )
+
+    with pytest.raises(ReportError, match="REPEAT historical context"):
+        render_markdown(
+            DATE_RANGE,
+            [invalid],
+            parsed_content(explanation("story_001")),
+        )
+
+
+@pytest.mark.parametrize(
+    ("reason", "expected"),
+    [
+        (
+            "no_prepared_candidates",
+            "No candidates were available for curation",
+        ),
+        (
+            "no_selection",
+            "Candidates were assessed, but no story passed",
+        ),
+        (
+            "all_repeats",
+            "All assessed candidates repeated previously covered events",
+        ),
+    ],
+)
+def test_empty_report_reasons_are_distinct_and_make_no_request(
+    reason: str, expected: str
+) -> None:
+    responses = FakeResponses(error=AssertionError("must not be called"))
+
+    markdown = generate_report(
+        DATE_RANGE,
+        [],
+        AppConfig(),
+        client=FakeClient(responses),
+        empty_reason=reason,
+    )
+
+    assert expected in markdown
+    assert responses.calls == []
 
 
 def test_category_and_organization_are_rendered() -> None:

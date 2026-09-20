@@ -1,22 +1,30 @@
 from datetime import date
+import hashlib
+import json
 from typing import Any
 
+import httpx2
 import pytest
+from openai import DefaultHttpxClient, OpenAI
+from openai.lib._parsing._responses import type_to_text_format_param
 
 import ai_weekly_agent.curate as curate_module
 from ai_weekly_agent.config import AppConfig
 from ai_weekly_agent.curate import (
+    CurationStatistics,
     MAX_CURATED_ITEMS,
     MIN_CURATED_SCORE,
     CuratorError,
     calculate_final_score,
     curate_research_run,
 )
+from ai_weekly_agent.history import HistoryLoadResult
 from ai_weekly_agent.models import (
     CategoryResearchResult,
     CurationAssessment,
     DateRange,
     FactSupport,
+    HistoricalStory,
     NewsItem,
     ResearchRun,
     Source,
@@ -138,6 +146,73 @@ def client_for(*assessments: dict[str, Any]) -> FakeClient:
     return FakeClient(FakeResponses(list(assessments)))
 
 
+def sdk_client_for(
+    output: dict[str, Any] | str | None,
+    captured_requests: list[dict[str, Any]],
+    *,
+    refusal: str | None = None,
+    response_status: str = "completed",
+) -> OpenAI:
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        captured_requests.append(json.loads(request.content))
+        if refusal is not None:
+            content = [{"refusal": refusal, "type": "refusal"}]
+        elif output is None:
+            content = []
+        else:
+            content = [
+                {
+                    "annotations": [],
+                    "text": (
+                        output if isinstance(output, str) else json.dumps(output)
+                    ),
+                    "type": "output_text",
+                }
+            ]
+        return httpx2.Response(
+            200,
+            json={
+                "id": "resp_sanitized_test",
+                "created_at": 1_789_000_000,
+                "model": MODEL,
+                "object": "response",
+                "output": [
+                    {
+                        "id": "msg_sanitized_test",
+                        "content": content,
+                        "role": "assistant",
+                        "status": response_status,
+                        "type": "message",
+                    }
+                ],
+                "parallel_tool_calls": False,
+                "status": response_status,
+                "tool_choice": "auto",
+                "tools": [],
+            },
+        )
+
+    return OpenAI(
+        api_key="test-key-not-a-real-credential",
+        http_client=DefaultHttpxClient(transport=httpx2.MockTransport(handler)),
+        max_retries=0,
+    )
+
+
+def schema_property_names(value: object) -> set[str]:
+    names: set[str] = set()
+    if isinstance(value, dict):
+        properties = value.get("properties")
+        if isinstance(properties, dict):
+            names.update(properties)
+        for nested in value.values():
+            names.update(schema_property_names(nested))
+    elif isinstance(value, list):
+        for nested in value:
+            names.update(schema_property_names(nested))
+    return names
+
+
 def curate_with(
     research_run: ResearchRun,
     *assessments: dict[str, Any],
@@ -147,6 +222,81 @@ def curate_with(
         research_run,
         configured_app(),
         client=client,
+    )
+    return result, client
+
+
+def historical_story(
+    title: str,
+    *,
+    history_id: str = "history_2026-08-23_to_2026-08-29_story_001",
+    source_url: str | None = None,
+    summary: str | None = None,
+    organization: str | None = "Example Lab",
+    position: int = 1,
+) -> HistoricalStory:
+    item = make_item(
+        title,
+        organization=organization,
+        published_date=date(2026, 8, 27),
+        source_urls=(source_url,) if source_url is not None else None,
+    )
+    if summary is not None:
+        item.summary = summary
+    return HistoricalStory(
+        history_id=history_id,
+        report_date_range=DateRange(
+            start=date(2026, 8, 23), end=date(2026, 8, 29)
+        ),
+        report_position=position,
+        item=item,
+    )
+
+
+def history_result(
+    state: str,
+    *stories: HistoricalStory,
+) -> HistoryLoadResult:
+    return HistoryLoadResult(
+        state=state,
+        stories=tuple(stories),
+        diagnostics=(),
+        runs_loaded=int(bool(stories)),
+        skipped_count=int(state == "partial"),
+    )
+
+
+def historical_assessment(
+    candidate_id: str,
+    status: str,
+    *,
+    match_id: str | None = None,
+    change_refs: list[dict[str, object]] | None = None,
+    scores: tuple[int, int, int, int] = (4, 4, 4, 4),
+    duplicate_of: str | None = None,
+) -> dict[str, Any]:
+    payload = assessment(
+        candidate_id, scores=scores, duplicate_of=duplicate_of
+    )
+    payload.update(
+        historical_status=status,
+        historical_match_id=match_id,
+        material_change_refs=change_refs or [],
+    )
+    return payload
+
+
+def curate_with_history(
+    research_run: ResearchRun,
+    history: HistoryLoadResult,
+    *assessments: dict[str, Any],
+) -> tuple[list, FakeClient]:
+    client = client_for(*assessments)
+    result = curate_research_run(
+        research_run,
+        configured_app(),
+        client=client,
+        history=history,
     )
     return result, client
 
@@ -381,9 +531,241 @@ def test_structured_assessments_parse_into_curated_items() -> None:
     )
 
     assert client.responses.calls[0]["text_format"].__name__ == (
-        "_CurationResponse"
+        "_NoHistoryCurationResponse"
     )
     assert result[0].final_score == 4.0
+
+
+def test_no_history_sdk_request_schema_excludes_historical_fields() -> None:
+    captured_requests: list[dict[str, Any]] = []
+    client = sdk_client_for(
+        {"assessments": [assessment("candidate_001")]},
+        captured_requests,
+    )
+
+    result = curate_research_run(
+        one_category_run(make_item("Release")),
+        configured_app(),
+        client=client,
+    )
+
+    assert len(result) == 1
+    assert len(captured_requests) == 1
+    request = captured_requests[0]
+    assert request.get("tools") is None
+    text_format = request["text"]["format"]
+    assert text_format["type"] == "json_schema"
+    assert text_format["strict"] is True
+    assert text_format["name"] == "_NoHistoryCurationResponse"
+    schema = text_format["schema"]
+    assessment_schema = schema["$defs"]["_NoHistoryCurationAssessment"]
+    assert schema["additionalProperties"] is False
+    assert assessment_schema["additionalProperties"] is False
+    assert schema["required"] == ["assessments"]
+    assert schema["properties"]["assessments"]["items"] == {
+        "$ref": "#/$defs/_NoHistoryCurationAssessment"
+    }
+    assert set(assessment_schema["required"]) == {
+        "candidate_id",
+        "impact",
+        "technical_significance",
+        "novelty",
+        "student_relevance",
+        "semantic_duplicate_of",
+    }
+    assert assessment_schema["properties"]["candidate_id"] == {
+        "minLength": 1,
+        "title": "Candidate Id",
+        "type": "string",
+    }
+    for score_name in (
+        "impact",
+        "technical_significance",
+        "novelty",
+        "student_relevance",
+    ):
+        assert assessment_schema["properties"][score_name]["type"] == "integer"
+        assert assessment_schema["properties"][score_name]["minimum"] == 1
+        assert assessment_schema["properties"][score_name]["maximum"] == 5
+    assert assessment_schema["properties"]["semantic_duplicate_of"][
+        "anyOf"
+    ] == [{"type": "string"}, {"type": "null"}]
+    properties = schema_property_names(schema)
+    assert {
+        "candidate_id",
+        "impact",
+        "technical_significance",
+        "novelty",
+        "student_relevance",
+        "semantic_duplicate_of",
+    } <= properties
+    assert {
+        "historical_status",
+        "historical_match_id",
+        "material_change_refs",
+        "historical_context",
+    }.isdisjoint(properties)
+    assert "historical_candidates" not in request["input"]
+    assert "historical_status" not in request["input"]
+
+
+def test_phase5c_prompt_change_preserves_both_response_schema_fingerprints() -> None:
+    def fingerprint(response_type: type[Any]) -> str:
+        schema = type_to_text_format_param(response_type)["schema"]
+        encoded = json.dumps(
+            schema,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        return hashlib.sha256(encoded).hexdigest()
+
+    assert fingerprint(curate_module._NoHistoryCurationResponse) == (
+        "ebbb50d54720c88f8040552ce46895b34dfff2f69988d4389c8aeb7ff2f6a0eb"
+    )
+    assert fingerprint(curate_module._CurationResponse) == (
+        "d14fb3b5995974b1d39dae6c08ce8dfc7941affcfcb1d43748e274c4de63f462"
+    )
+
+
+def test_no_history_sdk_response_is_adapted_without_losing_scores_or_dedup() -> None:
+    captured_requests: list[dict[str, Any]] = []
+    client = sdk_client_for(
+        {
+            "assessments": [
+                assessment("candidate_001", scores=(4, 4, 4, 4)),
+                assessment(
+                    "candidate_002",
+                    scores=(5, 5, 5, 5),
+                    duplicate_of="candidate_001",
+                ),
+            ]
+        },
+        captured_requests,
+    )
+
+    result = curate_research_run(
+        one_category_run(make_item("First"), make_item("Second")),
+        configured_app(),
+        client=client,
+    )
+
+    assert len(captured_requests) == 1
+    assert len(result) == 1
+    assert result[0].item.title == "Second"
+    assert result[0].final_score == 5.0
+    assert result[0].historical_context is None
+
+
+def test_no_history_adapter_does_not_mutate_external_assessment() -> None:
+    external = curate_module._NoHistoryCurationAssessment(
+        candidate_id="candidate_001",
+        impact=5,
+        technical_significance=4,
+        novelty=3,
+        student_relevance=2,
+        semantic_duplicate_of="candidate_002",
+    )
+    snapshot = external.model_dump(mode="python")
+
+    internal = curate_module._adapt_no_history_assessment(external)
+
+    assert external.model_dump(mode="python") == snapshot
+    assert internal.candidate_id == external.candidate_id
+    assert internal.impact == external.impact
+    assert internal.technical_significance == external.technical_significance
+    assert internal.novelty == external.novelty
+    assert internal.student_relevance == external.student_relevance
+    assert internal.semantic_duplicate_of == external.semantic_duplicate_of
+    assert internal.historical_status is None
+    assert internal.historical_match_id is None
+    assert internal.material_change_refs == []
+
+
+@pytest.mark.parametrize(
+    "forbidden_field",
+    [
+        {"historical_status": "NEW"},
+        {"historical_match_id": None},
+        {"material_change_refs": []},
+    ],
+)
+def test_no_history_sdk_rejects_forbidden_historical_fields_without_retry(
+    forbidden_field: dict[str, Any],
+) -> None:
+    captured_requests: list[dict[str, Any]] = []
+    invalid = assessment("candidate_001")
+    invalid.update(forbidden_field)
+    client = sdk_client_for(
+        {"assessments": [invalid]},
+        captured_requests,
+    )
+
+    with pytest.raises(CuratorError, match="Invalid structured curation response"):
+        curate_research_run(
+            one_category_run(make_item("Release")),
+            configured_app(),
+            client=client,
+        )
+
+    assert len(captured_requests) == 1
+
+
+def test_no_history_sdk_contract_failure_publishes_only_preparse_statistics() -> None:
+    captured_requests: list[dict[str, Any]] = []
+    invalid = assessment("candidate_001")
+    invalid["historical_status"] = "NEW"
+    statistics = CurationStatistics()
+
+    with pytest.raises(CuratorError, match="Invalid structured curation response"):
+        curate_research_run(
+            one_category_run(make_item("Release")),
+            configured_app(),
+            client=sdk_client_for(
+                {"assessments": [invalid]}, captured_requests
+            ),
+            statistics=statistics,
+        )
+
+    assert len(captured_requests) == 1
+    assert statistics.prepared_candidate_count == 1
+    assert statistics.matched_current_candidate_count is None
+    assert statistics.validated_status_counts is None
+    assert statistics.repeats_suppressed is None
+    assert statistics.selected_follow_up_count is None
+
+
+@pytest.mark.parametrize(
+    ("output", "refusal", "response_status", "message"),
+    [
+        ("not valid JSON", None, "completed", "Invalid structured"),
+        (None, None, "completed", "no structured curation assessment"),
+        (None, "Sanitized refusal", "completed", "no structured curation assessment"),
+        (None, None, "incomplete", "no structured curation assessment"),
+    ],
+)
+def test_no_history_sdk_failure_shapes_do_not_retry_or_fabricate_success(
+    output: dict[str, Any] | str | None,
+    refusal: str | None,
+    response_status: str,
+    message: str,
+) -> None:
+    captured_requests: list[dict[str, Any]] = []
+    client = sdk_client_for(
+        output,
+        captured_requests,
+        refusal=refusal,
+        response_status=response_status,
+    )
+
+    with pytest.raises(CuratorError, match=message):
+        curate_research_run(
+            one_category_run(make_item("Release")),
+            configured_app(),
+            client=client,
+        )
+
+    assert len(captured_requests) == 1
 
 
 def test_complete_assessment_set_is_accepted_in_any_order() -> None:
@@ -1143,3 +1525,829 @@ def test_background_primary_source_does_not_improve_semantic_event_quality() -> 
     ))
 
     assert curate_module._primary_source_count(item) == 1
+
+
+# Version 0.5 Phase 2: optional historical-continuity integration.
+
+
+def test_no_history_preserves_legacy_prompt_response_and_output() -> None:
+    result, client = curate_with(
+        one_category_run(make_item("Legacy-compatible release")),
+        assessment("candidate_001"),
+    )
+
+    prompt = client.responses.calls[0]["input"]
+    assert "historical_candidates" not in prompt
+    assert "historical_status" not in prompt
+    assert "First establish event identity" not in prompt
+    assert hashlib.sha256(prompt.encode("utf-8")).hexdigest() == (
+        "75be886273b81a94fb6833568abe4a7922ebe5ff2c6e9701f571c484687fbe4e"
+    )
+    assert result[0].historical_context is None
+    assert len(client.responses.calls) == 1
+
+
+def test_unavailable_history_preserves_v04_behavior() -> None:
+    ignored_story = historical_story("Potential prior event")
+    result, client = curate_with_history(
+        one_category_run(make_item("Current event")),
+        history_result("unavailable", ignored_story),
+        assessment("candidate_001"),
+    )
+
+    assert result[0].historical_context is None
+    assert "historical_candidates" not in client.responses.calls[0]["input"]
+    assert client.responses.calls[0]["text_format"].__name__ == (
+        "_NoHistoryCurationResponse"
+    )
+
+
+def test_no_history_fake_boundary_rejects_unrequested_historical_judgment() -> None:
+    with pytest.raises(CuratorError, match="Invalid structured curation response"):
+        curate_with(
+            one_category_run(make_item("Current event")),
+            historical_assessment("candidate_001", "NEW"),
+        )
+
+
+def test_history_enabled_sdk_request_retains_schema_and_mixed_mode_behavior() -> None:
+    shared_url = "https://example.com/model-x"
+    prior = historical_story("Model X announcement", source_url=shared_url)
+    matched = make_item("Model X update", source_urls=(shared_url,))
+    unmatched = make_item(
+        "Independent compiler release",
+        organization="Different Lab",
+        source_urls=("https://example.com/compiler",),
+    )
+    unmatched_assessment = assessment("candidate_002")
+    unmatched_assessment.update(
+        historical_status=None,
+        historical_match_id=None,
+        material_change_refs=[],
+    )
+    captured_requests: list[dict[str, Any]] = []
+    client = sdk_client_for(
+        {
+            "assessments": [
+                historical_assessment("candidate_001", "NEW"),
+                unmatched_assessment,
+            ]
+        },
+        captured_requests,
+    )
+
+    result = curate_research_run(
+        one_category_run(matched, unmatched),
+        configured_app(),
+        client=client,
+        history=history_result("complete", prior),
+    )
+
+    assert len(captured_requests) == 1
+    request = captured_requests[0]
+    assert request.get("tools") is None
+    assert '"historical_candidates"' in request["input"]
+    text_format = request["text"]["format"]
+    assert text_format["name"] == "_CurationResponse"
+    assert text_format["strict"] is True
+    schema = text_format["schema"]
+    assessment_schema = schema["$defs"]["CurationAssessment"]
+    reference_schema = schema["$defs"]["CurrentFactReference"]
+    assert schema["additionalProperties"] is False
+    assert assessment_schema["additionalProperties"] is False
+    assert reference_schema["additionalProperties"] is False
+    assert {
+        "historical_status",
+        "historical_match_id",
+        "material_change_refs",
+    } <= set(assessment_schema["properties"])
+    assert assessment_schema["properties"]["historical_status"]["anyOf"] == [
+        {
+            "enum": ["NEW", "FOLLOW_UP", "REPEAT", "UNCERTAIN"],
+            "type": "string",
+        },
+        {"type": "null"},
+    ]
+    assert set(reference_schema["properties"]) == {
+        "field",
+        "technical_detail_index",
+    }
+    assert [item.item.title for item in result] == [matched.title, unmatched.title]
+    assert [item.historical_context.status for item in result] == ["NEW", "NEW"]
+    assert result[1].historical_context.historical_match_id is None
+
+
+@pytest.mark.parametrize(
+    ("state", "expected_status"),
+    [("complete", "NEW"), ("partial", "UNCERTAIN")],
+)
+def test_no_match_receives_safe_local_status(
+    state: str, expected_status: str
+) -> None:
+    history = history_result(state, historical_story("Unrelated prior event"))
+
+    result, client = curate_with_history(
+        one_category_run(make_item("Distinct current release")),
+        history,
+        assessment("candidate_001"),
+    )
+
+    assert result[0].historical_context is not None
+    assert result[0].historical_context.status == expected_status
+    assert result[0].historical_context.historical_match_id is None
+    assert '"historical_candidates": []' in client.responses.calls[0]["input"]
+    assert client.responses.calls[0]["text_format"].__name__ == (
+        "_CurationResponse"
+    )
+
+
+@pytest.mark.parametrize("state", ["complete", "partial"])
+def test_model_cannot_override_local_no_match_status(state: str) -> None:
+    with pytest.raises(CuratorError, match="overrode a local historical status"):
+        curate_with_history(
+            one_category_run(make_item("Distinct current release")),
+            history_result(state, historical_story("Unrelated prior event")),
+            historical_assessment("candidate_001", "NEW"),
+        )
+
+
+def test_matched_new_has_grounded_status_without_prior_context() -> None:
+    url = "https://example.com/shared-product-page"
+    current = make_item("Company X releases Model B", source_urls=(url,))
+    prior = historical_story(
+        "Company X releases Model A", source_url=url
+    )
+
+    result, _ = curate_with_history(
+        one_category_run(current),
+        history_result("complete", prior),
+        historical_assessment("candidate_001", "NEW"),
+    )
+
+    assert result[0].historical_context is not None
+    assert result[0].historical_context.status == "NEW"
+    assert result[0].historical_context.historical_match_id is None
+
+
+def test_same_organization_different_product_is_not_inherently_repeat() -> None:
+    prior = historical_story(
+        "Company X releases Model A", organization="Company X"
+    )
+    current = make_item(
+        "Company X releases Model B", organization="Company X"
+    )
+
+    result, client = curate_with_history(
+        one_category_run(current),
+        history_result("complete", prior),
+        assessment("candidate_001"),
+    )
+
+    assert result[0].historical_context is not None
+    assert result[0].historical_context.status == "NEW"
+    assert '"historical_candidates": []' in client.responses.calls[0]["input"]
+
+
+def test_follow_up_summary_reference_resolves_exact_current_text() -> None:
+    url = "https://example.com/model-x"
+    current = make_item("Model X API reaches general availability", source_urls=(url,))
+    current.summary = "Model X API is now generally available to developers."
+    prior = historical_story("Model X is announced", source_url=url)
+
+    result, _ = curate_with_history(
+        one_category_run(current),
+        history_result("complete", prior),
+        historical_assessment(
+            "candidate_001",
+            "FOLLOW_UP",
+            match_id=prior.history_id,
+            change_refs=[
+                {"field": "summary", "technical_detail_index": None}
+            ],
+        ),
+    )
+
+    context = result[0].historical_context
+    assert context is not None
+    assert context.status == "FOLLOW_UP"
+    assert context.historical_match_id == prior.history_id
+    assert context.prior_report_date_range == prior.report_date_range
+    assert context.prior_title == prior.item.title
+    assert context.material_change_facts == [current.summary]
+
+
+def test_follow_up_technical_reference_resolves_exact_index() -> None:
+    url = "https://example.com/model-x"
+    current = make_item(
+        "Model X API update",
+        source_urls=(url,),
+        technical_details=["Existing fact.", "Exact new API fact."],
+    )
+    prior = historical_story("Model X announcement", source_url=url)
+
+    result, _ = curate_with_history(
+        one_category_run(current),
+        history_result("complete", prior),
+        historical_assessment(
+            "candidate_001",
+            "FOLLOW_UP",
+            match_id=prior.history_id,
+            change_refs=[
+                {"field": "technical_detail", "technical_detail_index": 1}
+            ],
+        ),
+    )
+
+    assert result[0].historical_context is not None
+    assert result[0].historical_context.material_change_facts == [
+        "Exact new API fact."
+    ]
+
+
+def test_follow_up_benchmark_reference_resolves_exact_current_text() -> None:
+    url = "https://example.com/model-x"
+    current = make_item("Model X evaluation update", source_urls=(url,))
+    current.benchmark_information = "The paper reports 87% on ExampleBench."
+    prior = historical_story("Model X announcement", source_url=url)
+
+    result, _ = curate_with_history(
+        one_category_run(current),
+        history_result("complete", prior),
+        historical_assessment(
+            "candidate_001",
+            "FOLLOW_UP",
+            match_id=prior.history_id,
+            change_refs=[
+                {
+                    "field": "benchmark_information",
+                    "technical_detail_index": None,
+                }
+            ],
+        ),
+    )
+
+    assert result[0].historical_context is not None
+    assert result[0].historical_context.material_change_facts == [
+        current.benchmark_information
+    ]
+
+
+def test_repeat_is_removed_after_one_curate_call() -> None:
+    url = "https://example.com/model-x"
+    current = make_item("Model X launch repeated", source_urls=(url,))
+    prior = historical_story("Model X launch", source_url=url)
+
+    result, client = curate_with_history(
+        one_category_run(current),
+        history_result("complete", prior),
+        historical_assessment(
+            "candidate_001", "REPEAT", match_id=prior.history_id
+        ),
+    )
+
+    assert result == []
+    assert len(client.responses.calls) == 1
+
+
+def test_matched_uncertain_may_preserve_one_supplied_comparison() -> None:
+    url = "https://example.com/mutable-product-page"
+    current = make_item("Model X product update", source_urls=(url,))
+    prior = historical_story("Model X product launch", source_url=url)
+
+    result, _ = curate_with_history(
+        one_category_run(current),
+        history_result("partial", prior),
+        historical_assessment(
+            "candidate_001", "UNCERTAIN", match_id=prior.history_id
+        ),
+    )
+
+    context = result[0].historical_context
+    assert context is not None
+    assert context.status == "UNCERTAIN"
+    assert context.historical_match_id == prior.history_id
+    assert context.material_change_facts == []
+
+
+def test_matched_uncertain_may_omit_comparison_id() -> None:
+    url = "https://example.com/mutable-product-page"
+    prior = historical_story("Model X product launch", source_url=url)
+
+    result, _ = curate_with_history(
+        one_category_run(make_item("Model X product update", source_urls=(url,))),
+        history_result("complete", prior),
+        historical_assessment("candidate_001", "UNCERTAIN"),
+    )
+
+    assert result[0].historical_context is not None
+    assert result[0].historical_context.historical_match_id is None
+
+
+def test_matched_candidate_requires_historical_status() -> None:
+    url = "https://example.com/model-x"
+    prior = historical_story("Model X announcement", source_url=url)
+
+    with pytest.raises(CuratorError, match="omitted matched historical status"):
+        curate_with_history(
+            one_category_run(make_item("Model X update", source_urls=(url,))),
+            history_result("complete", prior),
+            assessment("candidate_001"),
+        )
+
+
+def test_unknown_historical_match_id_is_rejected_without_retry() -> None:
+    url = "https://example.com/model-x"
+    prior = historical_story("Model X announcement", source_url=url)
+    client = client_for(
+        historical_assessment(
+            "candidate_001", "REPEAT", match_id="history_not_supplied"
+        )
+    )
+
+    with pytest.raises(CuratorError, match="unknown historical match"):
+        curate_research_run(
+            one_category_run(make_item("Model X update", source_urls=(url,))),
+            configured_app(),
+            client=client,
+            history=history_result("complete", prior),
+        )
+
+    assert len(client.responses.calls) == 1
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        historical_assessment("candidate_001", "NEW", match_id="history_x"),
+        historical_assessment(
+            "candidate_001",
+            "REPEAT",
+            match_id="history_x",
+            change_refs=[
+                {"field": "summary", "technical_detail_index": None}
+            ],
+        ),
+        historical_assessment(
+            "candidate_001", "FOLLOW_UP", match_id="history_x"
+        ),
+    ],
+)
+def test_status_and_match_shape_contradictions_are_rejected(
+    payload: dict[str, Any],
+) -> None:
+    url = "https://example.com/model-x"
+    prior = historical_story("Model X announcement", source_url=url)
+
+    with pytest.raises(CuratorError, match="Invalid structured"):
+        curate_with_history(
+            one_category_run(make_item("Model X update", source_urls=(url,))),
+            history_result("complete", prior),
+            payload,
+        )
+
+
+@pytest.mark.parametrize(
+    "reference",
+    [
+        {"field": "technical_detail", "technical_detail_index": 9},
+        {"field": "benchmark_information", "technical_detail_index": None},
+    ],
+)
+def test_follow_up_reference_must_resolve_on_current_item(
+    reference: dict[str, object],
+) -> None:
+    url = "https://example.com/model-x"
+    prior = historical_story("Model X announcement", source_url=url)
+
+    with pytest.raises(CuratorError, match="material-change reference"):
+        curate_with_history(
+            one_category_run(make_item("Model X update", source_urls=(url,))),
+            history_result("complete", prior),
+            historical_assessment(
+                "candidate_001",
+                "FOLLOW_UP",
+                match_id=prior.history_id,
+                change_refs=[reference],
+            ),
+        )
+
+
+@pytest.mark.parametrize(
+    "reference",
+    [
+        {"field": "technical_detail", "technical_detail_index": -1},
+        {"field": "summary", "technical_detail_index": 0},
+        {
+            "field": "summary",
+            "technical_detail_index": None,
+            "text": "Model-authored change text is forbidden.",
+        },
+    ],
+)
+def test_malformed_or_free_form_change_reference_is_rejected(
+    reference: dict[str, object],
+) -> None:
+    url = "https://example.com/model-x"
+    prior = historical_story("Model X announcement", source_url=url)
+
+    with pytest.raises(CuratorError, match="Invalid structured"):
+        curate_with_history(
+            one_category_run(make_item("Model X update", source_urls=(url,))),
+            history_result("complete", prior),
+            historical_assessment(
+                "candidate_001",
+                "FOLLOW_UP",
+                match_id=prior.history_id,
+                change_refs=[reference],
+            ),
+        )
+
+
+def test_duplicate_material_change_references_are_rejected() -> None:
+    url = "https://example.com/model-x"
+    prior = historical_story("Model X announcement", source_url=url)
+    reference = {"field": "summary", "technical_detail_index": None}
+
+    with pytest.raises(CuratorError, match="Invalid structured"):
+        curate_with_history(
+            one_category_run(make_item("Model X update", source_urls=(url,))),
+            history_result("complete", prior),
+            historical_assessment(
+                "candidate_001",
+                "FOLLOW_UP",
+                match_id=prior.history_id,
+                change_refs=[reference, reference],
+            ),
+        )
+
+
+def test_historical_text_cannot_replace_current_change_evidence() -> None:
+    url = "https://example.com/model-x"
+    current = make_item("Model X update", source_urls=(url,))
+    current.summary = "Exact current verified development."
+    prior = historical_story(
+        "Model X announcement",
+        source_url=url,
+        summary="Different historical fact that must not be copied.",
+    )
+
+    result, _ = curate_with_history(
+        one_category_run(current),
+        history_result("complete", prior),
+        historical_assessment(
+            "candidate_001",
+            "FOLLOW_UP",
+            match_id=prior.history_id,
+            change_refs=[
+                {"field": "summary", "technical_detail_index": None}
+            ],
+        ),
+    )
+
+    context = result[0].historical_context
+    assert context is not None
+    assert context.material_change_facts == [current.summary]
+    assert prior.item.summary not in context.material_change_facts
+
+
+def test_repeats_are_filtered_before_threshold_and_selection_cap() -> None:
+    shared_url = "https://example.com/repeated-event"
+    repeated = make_item("Repeated event", source_urls=(shared_url,))
+    prior = historical_story("Repeated event", source_url=shared_url)
+    current_items = [repeated] + [
+        make_item(f"Current event {index}") for index in range(1, 14)
+    ]
+    responses = [
+        historical_assessment(
+            "candidate_001",
+            "REPEAT",
+            match_id=prior.history_id,
+            scores=(5, 5, 5, 5),
+        )
+    ] + [
+        assessment(f"candidate_{index:03d}", scores=(4, 4, 4, 4))
+        for index in range(2, 15)
+    ]
+
+    result, client = curate_with_history(
+        one_category_run(*current_items),
+        history_result("complete", prior),
+        *responses,
+    )
+
+    assert len(result) == MAX_CURATED_ITEMS
+    assert all(item.item.title != repeated.title for item in result)
+    assert len(client.responses.calls) == 1
+
+
+def test_multiple_and_all_repeats_filter_deterministically() -> None:
+    first_url = "https://example.com/repeat-one"
+    second_url = "https://example.com/repeat-two"
+    prior_one = historical_story("Repeat one", source_url=first_url)
+    prior_two = historical_story(
+        "Repeat two",
+        history_id="history_2026-08-23_to_2026-08-29_story_002",
+        source_url=second_url,
+        position=2,
+    )
+
+    result, client = curate_with_history(
+        one_category_run(
+            make_item("Repeat one", source_urls=(first_url,)),
+            make_item("Repeat two", source_urls=(second_url,)),
+        ),
+        history_result("complete", prior_one, prior_two),
+        historical_assessment(
+            "candidate_001", "REPEAT", match_id=prior_one.history_id
+        ),
+        historical_assessment(
+            "candidate_002", "REPEAT", match_id=prior_two.history_id
+        ),
+    )
+
+    assert result == []
+    assert len(client.responses.calls) == 1
+
+
+def test_historical_status_does_not_replace_current_semantic_dedup() -> None:
+    history = history_result("complete", historical_story("Unrelated prior"))
+    first = make_item("Current headline one")
+    second = make_item("Current headline two")
+
+    result, _ = curate_with_history(
+        one_category_run(first, second),
+        history,
+        assessment("candidate_001"),
+        assessment("candidate_002", duplicate_of="candidate_001"),
+    )
+
+    assert [item.item for item in result] == [first]
+
+
+def test_historical_status_does_not_replace_current_exact_dedup() -> None:
+    first = make_item("Same current event")
+    duplicate = make_item("same current event")
+
+    result, client = curate_with_history(
+        one_category_run(first, duplicate),
+        history_result("complete", historical_story("Unrelated prior")),
+        assessment("candidate_001"),
+    )
+
+    assert [item.item for item in result] == [first]
+    assert "candidate_002" not in client.responses.calls[0]["input"]
+
+
+def test_repeat_filter_cannot_displace_semantic_duplicate_nonrepeat() -> None:
+    url = "https://example.com/model-x"
+    prior = historical_story("Model X announcement", source_url=url)
+    repeated = make_item("Model X repeated coverage", source_urls=(url,))
+    follow_up = make_item("Model X distinct current update", source_urls=(url,))
+
+    result, _ = curate_with_history(
+        one_category_run(repeated, follow_up),
+        history_result("complete", prior),
+        historical_assessment(
+            "candidate_001",
+            "REPEAT",
+            match_id=prior.history_id,
+            scores=(5, 5, 5, 5),
+        ),
+        historical_assessment(
+            "candidate_002",
+            "NEW",
+            duplicate_of="candidate_001",
+            scores=(4, 4, 4, 4),
+        ),
+    )
+
+    assert [item.item for item in result] == [follow_up]
+
+
+def test_shared_mutable_url_can_remain_uncertain_and_never_forces_repeat() -> None:
+    url = "https://example.com/mutable-product-page"
+    prior = historical_story("Model X launch", source_url=url)
+
+    result, _ = curate_with_history(
+        one_category_run(make_item("Model X update", source_urls=(url,))),
+        history_result("complete", prior),
+        historical_assessment("candidate_001", "UNCERTAIN"),
+    )
+
+    assert result[0].historical_context is not None
+    assert result[0].historical_context.status == "UNCERTAIN"
+
+
+def test_historical_prompt_is_bounded_typed_and_excludes_forbidden_data() -> None:
+    current = make_item(
+        "Photon Compiler API reaches general availability",
+        source_urls=("https://current.example/photon-ga",),
+    )
+    stories = tuple(
+        historical_story(
+            "Photon Compiler announcement",
+            history_id=(
+                "history_2026-08-23_to_2026-08-29_story_"
+                f"{index:03d}"
+            ),
+            source_url=f"https://prior.example/private-source-{index}",
+            position=index,
+        )
+        for index in range(1, 5)
+    )
+
+    result, client = curate_with_history(
+        one_category_run(current),
+        history_result("complete", *stories),
+        historical_assessment("candidate_001", "NEW"),
+    )
+
+    prompt = client.responses.calls[0]["input"]
+    assert result[0].historical_context is not None
+    assert prompt.count('"history_id"') == 3
+    assert stories[3].history_id not in prompt
+    assert '"match_reasons"' in prompt
+    assert "organization_title_terms" in prompt
+    assert "private-source" not in prompt
+    assert "what_it_is" not in prompt
+    assert "why_it_matters" not in prompt
+    assert "student_takeaway" not in prompt
+    assert "/home/" not in prompt
+    assert "raw source-page" not in prompt
+
+
+def test_historical_prompt_defines_statuses_and_current_fact_references() -> None:
+    url = "https://example.com/model-x"
+    prior = historical_story("Model X announcement", source_url=url)
+
+    _, client = curate_with_history(
+        one_category_run(make_item("Model X API update", source_urls=(url,))),
+        history_result("complete", prior),
+        historical_assessment("candidate_001", "NEW"),
+    )
+
+    prompt = client.responses.calls[0]["input"]
+    for status in ("REPEAT", "FOLLOW_UP", "NEW", "UNCERTAIN"):
+        assert f"`{status}`" in prompt
+    assert "retrieval only" in prompt.casefold()
+    assert "same organization alone" in prompt
+    assert "material_change_refs" in prompt
+    assert "not a fifth score" in prompt
+    assert "First establish event identity from the supplied facts" in prompt
+    assert "event equivalence itself remains unresolved" in prompt
+    assert "use `UNCERTAIN`, not `REPEAT`" in prompt
+    assert "A low quality score is not evidence of repetition" in prompt
+    assert "Never choose `FOLLOW_UP`" in prompt
+    assert "materially new current fact" in prompt
+    assert "Never\nwrite a factual what-changed sentence" in prompt
+    assert "<!-- HISTORICAL_CONTINUITY" not in prompt
+
+
+def test_history_enabled_curate_uses_one_call_and_no_tools() -> None:
+    url = "https://example.com/model-x"
+    prior = historical_story("Model X announcement", source_url=url)
+
+    _, client = curate_with_history(
+        one_category_run(make_item("Model X API update", source_urls=(url,))),
+        history_result("complete", prior),
+        historical_assessment("candidate_001", "NEW"),
+    )
+
+    assert len(client.responses.calls) == 1
+    call = client.responses.calls[0]
+    assert "tools" not in call
+    assert "tool_choice" not in call
+
+
+def test_historical_match_id_must_belong_to_that_current_candidate() -> None:
+    first_url = "https://example.com/first-chain"
+    second_url = "https://example.com/second-chain"
+    first_prior = historical_story(
+        "First prior", source_url=first_url
+    )
+    second_prior = historical_story(
+        "Second prior",
+        history_id="history_2026-08-23_to_2026-08-29_story_002",
+        source_url=second_url,
+        position=2,
+    )
+    client = client_for(
+        historical_assessment(
+            "candidate_001",
+            "REPEAT",
+            match_id=second_prior.history_id,
+        ),
+        historical_assessment("candidate_002", "NEW"),
+    )
+
+    with pytest.raises(CuratorError, match="unknown historical match"):
+        curate_research_run(
+            one_category_run(
+                make_item("First current", source_urls=(first_url,)),
+                make_item("Second current", source_urls=(second_url,)),
+            ),
+            configured_app(),
+            client=client,
+            history=history_result("complete", first_prior, second_prior),
+        )
+
+    assert len(client.responses.calls) == 1
+
+
+def test_statistics_count_matched_current_candidate_not_candidate_pairs() -> None:
+    current = make_item(
+        "Photon Compiler update",
+        source_urls=("https://example.com/shared",),
+    )
+    stories = tuple(
+        historical_story(
+            f"Photon Compiler prior {index}",
+            history_id=(
+                "history_2026-08-23_to_2026-08-29_story_"
+                f"{index:03d}"
+            ),
+            source_url="https://example.com/shared",
+            position=index,
+        )
+        for index in range(1, 4)
+    )
+    statistics = CurationStatistics()
+    client = client_for(historical_assessment("candidate_001", "NEW"))
+
+    result = curate_research_run(
+        one_category_run(current),
+        configured_app(),
+        client=client,
+        history=history_result("complete", *stories),
+        statistics=statistics,
+    )
+
+    assert len(result) == 1
+    assert statistics.prepared_candidate_count == 1
+    assert statistics.matched_current_candidate_count == 1
+    assert statistics.validated_status_counts == {
+        "NEW": 1,
+        "FOLLOW_UP": 0,
+        "REPEAT": 0,
+        "UNCERTAIN": 0,
+    }
+    assert statistics.repeats_suppressed == 0
+    assert statistics.selected_follow_up_count == 0
+
+
+def test_invalid_historical_output_does_not_publish_classification_totals() -> None:
+    url = "https://example.com/model-x"
+    prior = historical_story("Model X prior", source_url=url)
+    statistics = CurationStatistics()
+
+    with pytest.raises(CuratorError, match="unknown historical match"):
+        curate_research_run(
+            one_category_run(make_item("Model X current", source_urls=(url,))),
+            configured_app(),
+            client=client_for(
+                historical_assessment(
+                    "candidate_001",
+                    "REPEAT",
+                    match_id="history_not_supplied",
+                )
+            ),
+            history=history_result("complete", prior),
+            statistics=statistics,
+        )
+
+    assert statistics.prepared_candidate_count == 1
+    assert statistics.matched_current_candidate_count == 1
+    assert statistics.validated_status_counts is None
+    assert statistics.repeats_suppressed is None
+    assert statistics.selected_follow_up_count is None
+
+
+def test_reused_statistics_collector_is_reset_before_each_invocation() -> None:
+    url = "https://example.com/model-x"
+    prior = historical_story("Model X prior", source_url=url)
+    history = history_result("complete", prior)
+    statistics = CurationStatistics()
+
+    curate_research_run(
+        one_category_run(make_item("Model X current", source_urls=(url,))),
+        configured_app(),
+        client=client_for(historical_assessment("candidate_001", "NEW")),
+        history=history,
+        statistics=statistics,
+    )
+    assert statistics.validated_status_counts is not None
+
+    result = curate_research_run(
+        one_category_run(),
+        configured_app(),
+        client=client_for(),
+        history=history,
+        statistics=statistics,
+    )
+
+    assert result == []
+    assert statistics.prepared_candidate_count == 0
+    assert statistics.matched_current_candidate_count == 0
+    assert statistics.validated_status_counts is None
+    assert statistics.repeats_suppressed is None
+    assert statistics.selected_follow_up_count is None

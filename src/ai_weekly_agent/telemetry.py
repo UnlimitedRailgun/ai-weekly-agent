@@ -7,7 +7,14 @@ from pathlib import Path
 import tempfile
 from typing import Any, Literal
 
-from pydantic import AwareDatetime, BaseModel, Field, field_validator, model_validator
+from pydantic import (
+    AwareDatetime,
+    BaseModel,
+    ConfigDict,
+    Field,
+    field_validator,
+    model_validator,
+)
 
 from ai_weekly_agent.dates import raw_research_filename
 from ai_weekly_agent.models import DateRange
@@ -24,6 +31,7 @@ RunErrorStage = Literal[
     "save",
     "telemetry",
 ]
+HistoryLoadState = Literal["complete", "partial", "unavailable"]
 
 
 class ApiCallRecord(BaseModel):
@@ -72,6 +80,83 @@ class ApiUsageTotals(BaseModel):
     usage_complete: bool
 
 
+class HistoricalStatusCounts(BaseModel):
+    """Content-free counts for validated historical classifications."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    new: int = Field(ge=0)
+    follow_up: int = Field(ge=0)
+    repeat: int = Field(ge=0)
+    uncertain: int = Field(ge=0)
+
+
+class HistoryTelemetrySummary(BaseModel):
+    """Local history execution facts without story or model content."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    load_state: HistoryLoadState
+    usable_run_count: int = Field(ge=0)
+    reconstructed_story_count: int = Field(ge=0)
+    skipped_entry_count: int = Field(
+        ge=0,
+        description=(
+            "Combined count of historical RunRecord, artifact, or report-story "
+            "entries skipped during loading."
+        ),
+    )
+    prepared_candidate_count: int | None = Field(default=None, ge=0)
+    matched_current_candidate_count: int | None = Field(default=None, ge=0)
+    validated_status_counts: HistoricalStatusCounts | None = None
+    repeats_suppressed: int | None = Field(default=None, ge=0)
+    selected_follow_up_count: int | None = Field(default=None, ge=0)
+
+    @model_validator(mode="after")
+    def validate_stage_counts(self) -> "HistoryTelemetrySummary":
+        if (
+            self.prepared_candidate_count is not None
+            and self.matched_current_candidate_count is not None
+            and self.matched_current_candidate_count
+            > self.prepared_candidate_count
+        ):
+            raise ValueError(
+                "matched current candidates cannot exceed prepared candidates"
+            )
+
+        counts = self.validated_status_counts
+        if counts is None:
+            if (
+                self.repeats_suppressed is not None
+                or self.selected_follow_up_count is not None
+            ):
+                raise ValueError(
+                    "classification-derived counts require validated statuses"
+                )
+            return self
+
+        if self.prepared_candidate_count is None:
+            raise ValueError("validated statuses require prepared candidate count")
+        total = counts.new + counts.follow_up + counts.repeat + counts.uncertain
+        if total != self.prepared_candidate_count:
+            raise ValueError(
+                "validated status counts must cover every prepared candidate"
+            )
+        if self.repeats_suppressed != counts.repeat:
+            raise ValueError(
+                "repeats_suppressed must equal the validated REPEAT count"
+            )
+        if (
+            self.selected_follow_up_count is None
+            or self.selected_follow_up_count > counts.follow_up
+        ):
+            raise ValueError(
+                "selected_follow_up_count must be known and no greater than "
+                "validated FOLLOW_UP count"
+            )
+        return self
+
+
 class RunRecord(BaseModel):
     """Operational summary for one eventual CLI run, including partial runs."""
 
@@ -97,6 +182,7 @@ class RunRecord(BaseModel):
     verification_warning_count: int | None = Field(default=None, ge=0)
     verification_information_count: int | None = Field(default=None, ge=0)
     curated_item_count: int | None = Field(default=None, ge=0)
+    history: HistoryTelemetrySummary | None = None
     raw_research_path: Path | None = None
     report_path: Path | None = None
     run_record_path: Path | None = None

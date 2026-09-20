@@ -1,187 +1,148 @@
-# Codex Handoff — AI Weekly Agent v0.4 Phase 6B
+# Codex Handoff — AI Weekly Agent v0.5 Phase 6C Pre-Commit Record
 
 ## Task
 
-Publish the approved Version 0.4.0 release from the completed Phase 6B.1
-release-unblock state: review and verify the release diff, create one release
-commit and annotated tag, push `main` and `v0.4.0` to the approved origin, and
-create and verify the GitHub Release when authenticated tooling is available.
+Verify, explicitly stage, and create one local v0.5.0 release commit with
+subject `chore: release v0.5.0` from the 19 approved cumulative files. This
+handoff is finalized before the commit and intentionally does not claim the
+commit succeeded or contain its eventual SHA.
 
 ## Status
 
-**Release preparation complete; external publication authorized and in progress.**
-This handoff is intentionally truthful at the release-commit boundary. The final
-task result records the verified post-commit and external publication state; the
-annotated tag must not be moved merely to update this file afterward.
+**Pre-commit verification complete; the single authorized local commit is ready
+to be attempted.**
 
-## Released Version / Previous Baseline
+Tagging, pushing, publication, GitHub operations, remote verification, model
+requests, and all other network operations remain unauthorized.
 
-- Release target: `0.4.0`.
-- Previous released baseline: annotated `v0.3.0` at
-  `226b3e68defa6e13e3abeef14efb070e8989158e`.
-- Authoritative version files: `pyproject.toml` and
-  `src/ai_weekly_agent/__init__.py`.
-- Refreshed editable distribution, imported `__version__`, and project metadata
-  all report `0.4.0`.
+## Summary
 
-## Summary / Final Version 0.4 Scope
+The actual starting state matched the reviewed Phase 6B handoff: branch `main`,
+baseline `d06ac23e4dfd9f9460714f10c950afc666ad1fae`, empty index, 16 modified
+tracked files, three reviewed untracked files, and `0.5.0` in both authoritative
+version declarations. The cumulative diff and new files remain consistent with
+the reviewed Historical Awareness / Cross-Run Novelty work.
 
-- Added source-local `FactSupport` for summaries, technical details, and
-  benchmark information.
-- Added deterministic per-fact primary/original-evidence checks. Fresh Main
-  execution requires provenance; historical standalone validation retains an
-  explicit lower-assurance compatibility path.
-- Added conservative cross-category exact deduplication using a qualifying
-  primary event URL plus known date, guarded exact-title matching, and
-  evidence-aware whole-record representative selection without fact merging.
-- Corrected benchmark semantics: original benchmark evidence can support an
-  evaluation result, but cannot substitute for primary event/date or product
-  specification evidence.
-- Preserved grounded Report factual ownership, deterministic Markdown,
-  schema-v1 RunRecords, and the normal populated eight-call architecture:
-  six Research calls, one Curate call, and one Report call.
-- Included the Phase 6B.1 clock fix: if the sampled finish wall-clock time is
-  earlier than start, Main warns and omits the invalid best-effort RunRecord.
-  It does not fabricate/clamp time, and saved-report or primary-failure behavior
-  remains authoritative.
+The full offline suite, equivalent socket-blocked suite, and both help-only CLI
+paths passed. The proposed scope contains no detected secret, generated runtime
+artifact, temporary evaluator, capture, ledger, or unrelated file. No new
+implementation defect was found.
 
 ## Files Changed
 
-The release commit contains exactly these reviewed tracked files:
+Phase 6C changed only these pre-commit records before validation:
+
+- `docs/v0.5-validation.md` — added the authorization boundary, exact baseline,
+  offline results, and explicit pre-commit-record semantics.
+- `CODEX_HANDOFF.md` — replaced the Phase 6B handoff with this pre-commit record.
+
+No production logic, prompt, schema, retrieval, scoring, threshold,
+configuration, dependency, version, or test assertion changed in Phase 6C.
+
+The exact approved cumulative commit scope is:
 
 - `AGENTS.md`
 - `CODEX_HANDOFF.md`
 - `README.md`
-- `prompts/research.md`
+- `docs/v0.5-validation.md`
+- `prompts/curate.md`
 - `pyproject.toml`
 - `src/ai_weekly_agent/__init__.py`
 - `src/ai_weekly_agent/curate.py`
+- `src/ai_weekly_agent/history.py`
 - `src/ai_weekly_agent/main.py`
 - `src/ai_weekly_agent/models.py`
-- `src/ai_weekly_agent/verify.py`
+- `src/ai_weekly_agent/report.py`
+- `src/ai_weekly_agent/telemetry.py`
 - `tests/test_curate.py`
+- `tests/test_history.py`
 - `tests/test_main.py`
 - `tests/test_models.py`
-- `tests/test_research.py`
-- `tests/test_verify.py`
-
-No generated output, credential, environment, cache, egg-info/build output, raw
-Research JSON, RunRecord JSON, weekly report, or temporary diagnostic is part of
-the reviewed release diff.
+- `tests/test_report.py`
+- `tests/test_telemetry.py`
 
 ## Important Decisions
 
-- `FactSupport` and evidence-role/source-type classifications remain
-  model-reported metadata. Verify checks structural consistency and explicit
-  coverage; it is not independent webpage semantic fact-checking.
-- Normal fresh execution has no provenance opt-out or compatibility retry.
-- Exact deduplication uses a narrow identity proxy and keeps one complete
-  upstream record. It does not merge complementary evidence from duplicates.
-- Unknown dates remain allowed with an explicit warning; weak stories are not
-  invented to fill categories.
-- RunRecord schema remains 1. Logical call telemetry does not instrument hidden
-  SDK HTTP retries.
-- An inverted run wall clock results in an explicit warning and no RunRecord,
-  rather than false timestamps or a changed primary outcome.
-- One release commit and one immutable annotated `v0.4.0` tag are preferred.
+- The user accepted the documented false-`REPEAT` suppression risk for v0.5.0,
+  but the semantic limitation remains unresolved.
+- The frozen `candidate_005` expectation remains `UNCERTAIN`; both evaluated
+  history-enabled responses remain observed `REPEAT` results. Phase 5B and
+  Phase 5D are not relabelled as complete semantic passes.
+- Offline passing tests do not prove model semantic correctness. Live selected
+  historical-context rendering and a full v0.5 weekly pipeline remain untested.
+- Local package/application metadata is `0.5.0`; RunRecord schema remains 1.
+- This handoff is a submission-bound pre-commit record. The final execution
+  response, not a post-commit repository edit, must report the resulting commit
+  SHA, tree, parent, file list, and final status.
+
+## Baseline and Scope Checks
+
+- Branch: `main`.
+- Full baseline SHA: `d06ac23e4dfd9f9460714f10c950afc666ad1fae`.
+- Baseline subject: `chore: release v0.4.0`.
+- Baseline tree: `624809da893cef42a80325741458d726244ae6c1`.
+- Initial index: empty.
+- Initial worktree: exactly 16 modified tracked and three reviewed untracked
+  files, matching the 19-file approved list.
+- `pyproject.toml` version: `0.5.0`.
+- `src/ai_weekly_agent/__init__.py` version: `0.5.0`.
+- Existing local tags were inspected read-only. Phase 6C does not authorize
+  creating, moving, or deleting a tag.
+- `.env` and generated `data/raw/*.json`, `data/runs/*.json`, and `reports/*.md`
+  paths remain ignored and outside the proposed set.
 
 ## Commands / Tests Run
 
-Final Phase 6B verification:
+- `PYTHONPATH=src .venv/bin/python -m pytest`
+- Initial unavailable-helper attempt:
+  `PYTHONPATH=src .venv/bin/python /tmp/ai_weekly_socket_blocked_pytest.py -q`
+- Equivalent guarded suite:
+  `PYTHONPATH=/tmp/ai_weekly_phase6c_guard:src .venv/bin/python -m pytest -q`
+- `PYTHONPATH=/tmp/ai_weekly_phase6c_guard:src .venv/bin/python -m ai_weekly_agent.main --help`
+- `PYTHONPATH=/tmp/ai_weekly_phase6c_guard:src .venv/bin/ai-weekly --help`
+- `git diff --check`
+- `git status --short --branch --untracked-files=all`
+- `git diff --cached --name-status`
+- `git diff --name-status v0.4.0 --`
+- `git diff --stat v0.4.0 --`
+- `git ls-files --others --exclude-standard`
+- `git check-ignore -v .env data/raw/2099-01-01_to_2099-01-07.json data/runs/2099-01-01_to_2099-01-07.json reports/2099-W01.md`
+- Read-only `rg`, `find`, `git log`, `git rev-parse`, `git show-ref`, and
+  `git tag` checks for scope, versions, secrets, artifacts, baseline, and tags.
 
-```bash
-.venv/bin/python -c 'from importlib.metadata import version; from ai_weekly_agent import __version__; assert version("ai-weekly-agent") == __version__ == "0.4.0"; print(__version__)'
-.venv/bin/python -m pytest
-.venv/bin/python -m ai_weekly_agent.main --help
-.venv/bin/ai-weekly --help
-.venv/bin/ai-weekly-agent --help
-git diff --check
-git status --short
-```
-
-Release preflight also used:
-
-```bash
-git remote -v
-git branch --show-current
-git status --short --untracked-files=all
-git tag --list v0.4.0
-git diff --check
-git diff --cached --stat
-git diff --numstat
-git diff
-```
-
-Phase 6B.1 additionally ran the seven targeted suites, focused backwards-clock
-regressions, repeated socket-blocked full suites, editable-install/version
-checks, CLI checks, and artifact-hygiene checks recorded in that task result.
-No OpenAI Responses, `web_search`, weekly-pipeline, external fact-checking, or
-other product-network request was made during release preparation.
+No normal weekly CLI command or live evaluator was run.
 
 ## Test Results
 
-- Final ordinary offline suite: **478 passed in 4.16s**.
-- Phase 6B.1 seven targeted suites: **442 passed**.
-- Phase 6B.1 focused backwards-clock regressions: **3 passed**.
-- Phase 6B.1 three consecutive socket-blocked full suites: **478 passed each**,
-  with zero connection attempts.
-- Phase 6B.1 separate final socket-blocked suite: **478 passed**, zero attempts.
-- All three supported CLI help entry points passed.
-- Editable-package/public version assertion printed `0.4.0` and passed.
-- `git diff --check` passed.
+- Full offline suite: **655 passed**.
+- Equivalent socket/DNS-blocked full suite: **655 passed**,
+  `NETWORK_ATTEMPTS=0`.
+- Module help-only CLI: exit 0, `NETWORK_ATTEMPTS=0`.
+- Installed console-script help-only CLI: exit 0, `NETWORK_ATTEMPTS=0`.
+- `git diff --check`: passed before the final pre-commit document update; it
+  must be rerun on final content before staging.
+- The missing legacy `/tmp` helper attempt exited 2 before pytest started and
+  made no network request. The replacement guard lives only under `/tmp`.
+- OpenAI/web/GitHub/other network requests: zero.
 
-Before the bounded clock fix, intermittent guarded full-suite failures exposed
-inverted wall-clock samples at RunRecord construction. A controlled rollback
-reproduced the defect. The final results above are post-fix; the earlier failures
-are not presented as release-validation passes.
+## Known Issues
 
-## Phase 5 Controlled Live Summary
+- The `candidate_005` false-`REPEAT` discrepancy remains unresolved.
+- False suppression of useful stories on other inputs remains possible and
+  unmeasured.
+- Live selected-history rendering and the full v0.5 weekly pipeline remain
+  untested.
+- At the time this pre-commit record was finalized, v0.5.0 had not yet been
+  committed, tagged, pushed, or published.
 
-One approved live run for 2026-09-06 through 2026-09-12 used the normal pipeline:
-11 raw candidates, 11 strict Verify acceptances, 11 prepared candidates, 10
-final stories, eight logical Responses calls, and 266,276 reported tokens. All
-retained Sources carried `FactSupport` and evidence-role metadata; all 44
-technical details and all 3 non-null benchmark fields had explicit model-reported
-support. No duplicate group occurred in that sample, so exact and semantic
-duplicate handling remain offline-tested rather than live-demonstrated.
+## Open Questions
 
-## Release Publication Record
-
-- Release commit SHA: pending at release-commit boundary; final task result.
-- Annotated tag object: pending; final task result.
-- Annotated tag peeled commit: pending; final task result.
-- Approved origin: `https://github.com/UnlimitedRailgun/ai-weekly-agent.git`.
-- Branch push: pending; final task result.
-- Tag push: pending; final task result.
-- Remote branch SHA: pending; final task result.
-- Remote peeled tag SHA: pending; final task result.
-- GitHub Release status: pending; final task result.
-- GitHub Release title: `AI Weekly Agent v0.4.0 — Evidence Provenance and Research Quality`.
-- GitHub Release URL: pending; final task result.
-
-## Known Issues / Limitations
-
-- Provenance metadata is not independent semantic proof, and mutable pages may
-  not establish historical launch-time evidence.
-- The conservative URL/date identity proxy can miss duplicates or theoretically
-  merge distinct events when upstream metadata is wrong.
-- Whole-record representative selection intentionally discards complementary
-  evidence from losing duplicates.
-- Strict candidate rejection favors precision over recall.
-- The approved live sample did not exercise an exact duplicate group.
-- ISO-week report filenames can collide for different ranges ending in the same
-  week, and hidden SDK HTTP retries remain uninstrumented.
-- A backwards run clock causes best-effort RunRecord loss with a warning.
-
-## Open Questions / Remaining Publication Issue
-
-No local release blocker remains. At this release-commit boundary, Git/GitHub
-publication and its remote verification are the only pending external steps.
+None for the authorized local commit. Any tag, push, remote check, GitHub
+Release, or publication requires separate explicit authorization.
 
 ## Recommended Next Step
 
-Complete and verify the authorized `main` and `v0.4.0` publication plus the
-normal GitHub Release. After release, consider future themes such as improving
-source classification quality, collision-safe report naming, and deciding
-whether duplicate evidence merging is justified. Do not begin Version 0.5 in
-this task.
+Rerun all required offline checks against this finalized pre-commit content. If
+they pass, explicitly stage exactly the 19 approved paths, verify the index and
+record its tree SHA, then create one local commit with subject
+`chore: release v0.5.0`. Afterward perform read-only local verification and stop.
