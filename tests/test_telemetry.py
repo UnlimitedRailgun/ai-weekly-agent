@@ -13,6 +13,7 @@ from ai_weekly_agent.telemetry import (
     ApiCallRecord,
     HistoricalStatusCounts,
     HistoryTelemetrySummary,
+    PublicationTelemetrySummary,
     RunRecord,
     TelemetryRecorder,
     observe_openai_client,
@@ -501,6 +502,89 @@ def test_old_schema_v1_json_without_research_category_still_parses() -> None:
     assert restored.api_calls[0].stage == "research"
     assert restored.api_calls[0].research_category is None
     assert restored.history is None
+    assert restored.publication is None
+
+
+@pytest.mark.parametrize(
+    ("state", "durability_confirmed"),
+    [
+        ("not_published", None),
+        ("published", True),
+        ("published", False),
+        ("unknown", None),
+    ],
+)
+def test_publication_summary_round_trips_with_schema_v1(
+    state: str,
+    durability_confirmed: bool | None,
+) -> None:
+    summary = PublicationTelemetrySummary(
+        run_id="a" * 32,
+        state=state,
+        durability_confirmed=durability_confirmed,
+    )
+    record = make_run_record().model_copy(update={"publication": summary})
+
+    restored = RunRecord.model_validate_json(record.model_dump_json())
+
+    assert restored.schema_version == 1
+    assert restored.publication == summary
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {
+            "run_id": "a" * 32,
+            "state": "published",
+            "durability_confirmed": None,
+        },
+        {
+            "run_id": "a" * 32,
+            "state": "not_published",
+            "durability_confirmed": False,
+        },
+        {
+            "run_id": "a" * 32,
+            "state": "unknown",
+            "durability_confirmed": True,
+        },
+        {
+            "run_id": "not-canonical",
+            "state": "unknown",
+            "durability_confirmed": None,
+        },
+    ],
+)
+def test_publication_summary_rejects_inconsistent_outcomes(
+    payload: dict[str, object],
+) -> None:
+    with pytest.raises(ValidationError):
+        PublicationTelemetrySummary.model_validate(payload)
+
+
+def test_released_v04_reader_ignores_additive_publication_field() -> None:
+    class ReleasedV04Reader(BaseModel):
+        schema_version: Literal[1] = 1
+        application_version: str
+        date_range: DateRange
+        started_at: datetime
+        finished_at: datetime
+        status: Literal["success", "failed"]
+
+    summary = PublicationTelemetrySummary(
+        run_id="b" * 32,
+        state="published",
+        durability_confirmed=True,
+    )
+    payload = make_run_record().model_copy(
+        update={"publication": summary}
+    ).model_dump(mode="json")
+
+    restored = ReleasedV04Reader.model_validate(payload)
+
+    assert restored.schema_version == 1
+    assert "publication" not in restored.model_dump()
 
 
 def test_history_telemetry_summary_round_trips_without_content() -> None:

@@ -21,6 +21,11 @@ from ai_weekly_agent.models import (
 )
 from ai_weekly_agent.research import normalize_source_url
 from ai_weekly_agent.report import NO_BENCHMARK_INFORMATION, NO_TECHNICAL_DETAILS
+from ai_weekly_agent.storage import (
+    InvalidPublicationError,
+    PublicationStorage,
+    PublishedArtifactSet,
+)
 from ai_weekly_agent.telemetry import RunRecord, run_record_filename
 
 
@@ -28,6 +33,7 @@ HISTORY_LOOKBACK_RUNS = 4
 MAX_HISTORY_CANDIDATES = 3
 
 HistoryLoadState = Literal["complete", "partial", "unavailable"]
+LegacyPublicationState = Literal["absent", "published", "invalid"]
 
 _REPORT_TITLE = "# AI & Computer Engineering Weekly"
 _EMPTY_REPORT_TEXTS = (
@@ -96,6 +102,14 @@ class HistoryLoadResult:
     diagnostics: tuple[HistoryDiagnostic, ...]
     runs_loaded: int
     skipped_count: int
+
+
+@dataclass(frozen=True)
+class LegacyPublicationCheck:
+    """Exact-range legacy publication status for CLI preflight."""
+
+    state: LegacyPublicationState
+    diagnostic: HistoryDiagnostic | None = None
 
 
 @dataclass(frozen=True)
@@ -267,6 +281,377 @@ def load_history(
     )
 
 
+def load_publication_history(
+    current_date_range: DateRange,
+    *,
+    storage: PublicationStorage,
+    lookback_runs: int = HISTORY_LOOKBACK_RUNS,
+) -> HistoryLoadResult:
+    """Load manifest-backed and legacy history from one trusted root.
+
+    Canonical publication-manifest filenames establish authority for an exact
+    date range before either format is loaded. A present invalid publication
+    therefore masks same-range legacy data instead of falling back to it.
+    The normal CLI uses this entry point with the same ``PublicationStorage``
+    instance that owns the current attempt and publication.
+    """
+    if lookback_runs <= 0:
+        raise ValueError("lookback_runs must be positive")
+
+    run_root = storage.root / "data" / "runs"
+    raw_root = storage.root / "data" / "raw"
+    report_root = storage.root / "reports"
+    manifest_root = run_root / "published"
+    diagnostics: list[HistoryDiagnostic] = []
+    skipped_count = 0
+
+    try:
+        discovery = storage.discover_publications()
+    except InvalidPublicationError as exc:
+        return HistoryLoadResult(
+            state="unavailable",
+            stories=(),
+            diagnostics=(
+                HistoryDiagnostic(
+                    code="publication_discovery_failed",
+                    message=(
+                        "Could not safely discover publication manifests: "
+                        f"{type(exc).__name__}."
+                    ),
+                    path=manifest_root,
+                ),
+            ),
+            runs_loaded=0,
+            skipped_count=1,
+        )
+
+    for path in discovery.unexpected_entries:
+        diagnostics.append(
+            HistoryDiagnostic(
+                code="unexpected_publication_filename",
+                message="Publication entry has no canonical date-range filename.",
+                path=path,
+            )
+        )
+        skipped_count += 1
+
+    manifest_by_key = {
+        (date_range.start, date_range.end): date_range
+        for date_range in discovery.date_ranges
+    }
+    eligible_manifest_ranges = [
+        date_range
+        for date_range in discovery.date_ranges
+        if _is_eligible_history_range(date_range, current_date_range)
+    ]
+
+    legacy_by_range: dict[
+        tuple[date, date], list[tuple[Path, RunRecord]]
+    ] = defaultdict(list)
+    if not run_root.is_dir():
+        if not manifest_by_key:
+            diagnostics.append(
+                HistoryDiagnostic(
+                    code="missing_runs_root",
+                    message="Historical RunRecord directory is unavailable.",
+                    path=run_root,
+                )
+            )
+            skipped_count += 1
+    else:
+        try:
+            legacy_paths = sorted(run_root.glob("*.json"))
+        except OSError as exc:
+            diagnostics.append(
+                HistoryDiagnostic(
+                    code="legacy_discovery_failed",
+                    message=(
+                        "Could not enumerate legacy RunRecords: "
+                        f"{type(exc).__name__}."
+                    ),
+                    path=run_root,
+                )
+            )
+            skipped_count += 1
+            legacy_paths = []
+
+        for path in legacy_paths:
+            filename_range = _canonical_range_from_filename(path.name)
+            filename_key = (
+                (filename_range.start, filename_range.end)
+                if filename_range is not None
+                else None
+            )
+            if filename_key in manifest_by_key:
+                continue
+            try:
+                record = RunRecord.model_validate_json(path.read_bytes())
+            except (OSError, UnicodeError, ValidationError) as exc:
+                diagnostics.append(
+                    HistoryDiagnostic(
+                        code="malformed_run_record",
+                        message=(
+                            "Could not parse historical RunRecord: "
+                            f"{type(exc).__name__}."
+                        ),
+                        path=path,
+                    )
+                )
+                skipped_count += 1
+                continue
+
+            record_key = (record.date_range.start, record.date_range.end)
+            if record_key in manifest_by_key:
+                continue
+            if record.status != "success":
+                continue
+            if not _is_eligible_history_range(
+                record.date_range, current_date_range
+            ):
+                continue
+            legacy_by_range[
+                (record.date_range.start, record.date_range.end)
+            ].append((path, record))
+
+    legacy_candidates: dict[tuple[date, date], tuple[Path, RunRecord]] = {}
+    for range_key, entries in legacy_by_range.items():
+        if len(entries) > 1:
+            diagnostics.append(
+                HistoryDiagnostic(
+                    code="duplicate_run_record",
+                    message=(
+                        "Multiple successful RunRecords describe one "
+                        "historical range."
+                    ),
+                    path=min(path for path, _ in entries),
+                )
+            )
+            skipped_count += len(entries)
+            continue
+        legacy_candidates[range_key] = entries[0]
+
+    candidate_ranges = {
+        (date_range.start, date_range.end): date_range
+        for date_range in eligible_manifest_ranges
+    }
+    for range_key, (_, record) in legacy_candidates.items():
+        candidate_ranges.setdefault(range_key, record.date_range)
+
+    ordered_ranges = sorted(
+        candidate_ranges.values(),
+        key=lambda value: (-value.end.toordinal(), -value.start.toordinal()),
+    )
+    stories: list[HistoricalStory] = []
+    runs_loaded = 0
+
+    for date_range in ordered_ranges:
+        if runs_loaded >= lookback_runs:
+            break
+        range_key = (date_range.start, date_range.end)
+        if range_key in manifest_by_key:
+            try:
+                publication = storage.read_publication(date_range)
+            except InvalidPublicationError as exc:
+                diagnostics.append(
+                    HistoryDiagnostic(
+                        code="invalid_publication",
+                        message=(
+                            "Published history is invalid and legacy fallback "
+                            f"was not used: {type(exc).__name__}."
+                        ),
+                        path=manifest_root / run_record_filename(date_range),
+                    )
+                )
+                skipped_count += 1
+                continue
+            if publication is None:
+                diagnostics.append(
+                    HistoryDiagnostic(
+                        code="publication_missing_after_discovery",
+                        message=(
+                            "Publication manifest disappeared after discovery; "
+                            "legacy fallback was not used."
+                        ),
+                        path=manifest_root / run_record_filename(date_range),
+                    )
+                )
+                skipped_count += 1
+                continue
+            try:
+                run_stories, run_diagnostics = _load_publication_stories(
+                    publication,
+                    expected_range=date_range,
+                )
+            except _HistoryArtifactError as exc:
+                diagnostics.append(
+                    HistoryDiagnostic(
+                        code=exc.code,
+                        message=str(exc),
+                        path=publication.manifest_path,
+                    )
+                )
+                skipped_count += 1
+                continue
+        else:
+            run_path, record = legacy_candidates[range_key]
+            if run_path.name != run_record_filename(record.date_range):
+                diagnostics.append(
+                    HistoryDiagnostic(
+                        code="unexpected_run_filename",
+                        message=(
+                            "Historical RunRecord does not use its date-range "
+                            "filename."
+                        ),
+                        path=run_path,
+                    )
+                )
+                skipped_count += 1
+                continue
+            try:
+                run_stories, run_diagnostics = _load_run_stories(
+                    record,
+                    raw_root=raw_root,
+                    report_root=report_root,
+                )
+            except _HistoryArtifactError as exc:
+                diagnostics.append(
+                    HistoryDiagnostic(
+                        code=exc.code,
+                        message=str(exc),
+                        path=run_path,
+                    )
+                )
+                skipped_count += 1
+                continue
+
+        diagnostics.extend(run_diagnostics)
+        skipped_count += len(run_diagnostics)
+        if not run_stories:
+            continue
+        stories.extend(run_stories)
+        runs_loaded += 1
+
+    return _history_result(
+        stories=stories,
+        diagnostics=diagnostics,
+        runs_loaded=runs_loaded,
+        skipped_count=skipped_count,
+    )
+
+
+def check_legacy_publication(
+    date_range: DateRange,
+    *,
+    storage: PublicationStorage,
+) -> LegacyPublicationCheck:
+    """Strictly inspect only legacy success authority for one exact range."""
+    run_root = storage.root / "data" / "runs"
+    raw_root = storage.root / "data" / "raw"
+    report_root = storage.root / "reports"
+    canonical_path = run_root / run_record_filename(date_range)
+
+    if run_root.is_symlink():
+        return _invalid_legacy_check(
+            "legacy_discovery_failed",
+            "Legacy RunRecord directory must not be a symbolic link.",
+            run_root,
+        )
+    if not run_root.exists():
+        return LegacyPublicationCheck(state="absent")
+    if not run_root.is_dir():
+        return _invalid_legacy_check(
+            "legacy_discovery_failed",
+            "Legacy RunRecord path is not a directory.",
+            run_root,
+        )
+    try:
+        paths = sorted(
+            path for path in run_root.iterdir() if path.suffix == ".json"
+        )
+    except OSError as exc:
+        return _invalid_legacy_check(
+            "legacy_discovery_failed",
+            f"Could not enumerate legacy RunRecords: {type(exc).__name__}.",
+            run_root,
+        )
+
+    successful: list[tuple[Path, RunRecord]] = []
+    for path in paths:
+        is_canonical_target = path == canonical_path
+        if path.is_symlink():
+            if is_canonical_target:
+                return _invalid_legacy_check(
+                    "malformed_run_record",
+                    "Exact-range legacy RunRecord must not be a symbolic link.",
+                    path,
+                )
+            continue
+        try:
+            record = RunRecord.model_validate_json(path.read_bytes())
+        except (OSError, UnicodeError, ValidationError) as exc:
+            if is_canonical_target:
+                return _invalid_legacy_check(
+                    "malformed_run_record",
+                    "Exact-range legacy RunRecord is malformed or unreadable: "
+                    f"{type(exc).__name__}.",
+                    path,
+                )
+            continue
+
+        if is_canonical_target and record.date_range != date_range:
+            return _invalid_legacy_check(
+                "range_mismatch",
+                "Exact-range legacy RunRecord content does not match its filename.",
+                path,
+            )
+        if record.date_range != date_range or record.status != "success":
+            continue
+        successful.append((path, record))
+
+    if not successful:
+        return LegacyPublicationCheck(state="absent")
+    if len(successful) > 1:
+        return _invalid_legacy_check(
+            "duplicate_run_record",
+            "Multiple successful legacy RunRecords describe this exact range.",
+            min(path for path, _ in successful),
+        )
+
+    run_path, record = successful[0]
+    if run_path != canonical_path:
+        return _invalid_legacy_check(
+            "unexpected_run_filename",
+            "Exact-range legacy success does not use its canonical filename.",
+            run_path,
+        )
+    try:
+        _, diagnostics = _load_run_stories(
+            record,
+            raw_root=raw_root,
+            report_root=report_root,
+        )
+    except _HistoryArtifactError as exc:
+        return _invalid_legacy_check(exc.code, str(exc), run_path)
+    if diagnostics:
+        return _invalid_legacy_check(
+            diagnostics[0].code,
+            "Exact-range legacy publication has unreconciled report content.",
+            run_path,
+        )
+    return LegacyPublicationCheck(state="published")
+
+
+def _invalid_legacy_check(
+    code: str,
+    message: str,
+    path: Path,
+) -> LegacyPublicationCheck:
+    return LegacyPublicationCheck(
+        state="invalid",
+        diagnostic=HistoryDiagnostic(code=code, message=message, path=path),
+    )
+
+
 def historical_story_id(date_range: DateRange, report_position: int) -> str:
     """Return the stable identity for one ordinal in one historical report."""
     if report_position < 1:
@@ -307,6 +692,51 @@ def _run_sort_key(entry: tuple[Path, RunRecord]) -> tuple[int, int, float, str]:
     )
 
 
+def _is_eligible_history_range(
+    candidate: DateRange,
+    current: DateRange,
+) -> bool:
+    return candidate != current and candidate.end < current.end
+
+
+def _canonical_range_from_filename(filename: str) -> DateRange | None:
+    match = re.fullmatch(
+        r"(\d{4}-\d{2}-\d{2})_to_(\d{4}-\d{2}-\d{2})\.json",
+        filename,
+    )
+    if match is None:
+        return None
+    try:
+        return DateRange(
+            start=date.fromisoformat(match.group(1)),
+            end=date.fromisoformat(match.group(2)),
+        )
+    except (ValidationError, ValueError):
+        return None
+
+
+def _history_result(
+    *,
+    stories: list[HistoricalStory],
+    diagnostics: list[HistoryDiagnostic],
+    runs_loaded: int,
+    skipped_count: int,
+) -> HistoryLoadResult:
+    if not stories:
+        state: HistoryLoadState = "unavailable"
+    elif diagnostics:
+        state = "partial"
+    else:
+        state = "complete"
+    return HistoryLoadResult(
+        state=state,
+        stories=tuple(stories),
+        diagnostics=tuple(diagnostics),
+        runs_loaded=runs_loaded,
+        skipped_count=skipped_count,
+    )
+
+
 def _load_run_stories(
     record: RunRecord,
     *,
@@ -327,38 +757,79 @@ def _load_run_stories(
     )
 
     try:
-        raw_text = raw_path.read_text(encoding="utf-8")
+        raw_bytes = raw_path.read_bytes()
     except OSError as exc:
         raise _HistoryArtifactError(
             "missing_raw_artifact",
             f"Could not read historical raw ResearchRun: {type(exc).__name__}.",
         ) from exc
-    try:
-        research_run = ResearchRun.model_validate_json(raw_text)
-    except ValidationError as exc:
-        raise _HistoryArtifactError(
-            "malformed_raw_artifact",
-            "Historical raw ResearchRun is malformed or unsupported.",
-        ) from exc
 
     try:
-        report_text = report_path.read_text(encoding="utf-8")
+        report_bytes = report_path.read_bytes()
     except OSError as exc:
         raise _HistoryArtifactError(
             "missing_report_artifact",
             f"Could not read historical report: {type(exc).__name__}.",
         ) from exc
 
-    if research_run.date_range != record.date_range:
+    return _load_story_bytes(
+        expected_range=record.date_range,
+        raw_bytes=raw_bytes,
+        report_bytes=report_bytes,
+        report_path=report_path,
+    )
+
+
+def _load_publication_stories(
+    publication: PublishedArtifactSet,
+    *,
+    expected_range: DateRange,
+) -> tuple[list[HistoricalStory], list[HistoryDiagnostic]]:
+    if publication.manifest.date_range.to_date_range() != expected_range:
         raise _HistoryArtifactError(
             "range_mismatch",
-            "RunRecord and raw ResearchRun date ranges do not match.",
+            "Publication manifest date range does not match its filename.",
+        )
+    return _load_story_bytes(
+        expected_range=expected_range,
+        raw_bytes=publication.raw_bytes,
+        report_bytes=publication.report_bytes,
+        report_path=publication.report_path,
+    )
+
+
+def _load_story_bytes(
+    *,
+    expected_range: DateRange,
+    raw_bytes: bytes,
+    report_bytes: bytes,
+    report_path: Path,
+) -> tuple[list[HistoricalStory], list[HistoryDiagnostic]]:
+    try:
+        research_run = ResearchRun.model_validate_json(raw_bytes)
+    except (UnicodeError, ValidationError) as exc:
+        raise _HistoryArtifactError(
+            "malformed_raw_artifact",
+            "Historical raw ResearchRun is malformed or unsupported.",
+        ) from exc
+    try:
+        report_text = report_bytes.decode("utf-8")
+    except UnicodeError as exc:
+        raise _HistoryArtifactError(
+            "malformed_report_artifact",
+            "Historical report is not valid UTF-8.",
+        ) from exc
+
+    if research_run.date_range != expected_range:
+        raise _HistoryArtifactError(
+            "range_mismatch",
+            "Published range and raw ResearchRun date ranges do not match.",
         )
     parsed_report = _parse_report(report_text)
-    if parsed_report.date_range != record.date_range:
+    if parsed_report.date_range != expected_range:
         raise _HistoryArtifactError(
             "range_mismatch",
-            "RunRecord and report date ranges do not match.",
+            "Published range and report date ranges do not match.",
         )
 
     stories, messages = _reconcile_report(research_run, parsed_report)

@@ -17,20 +17,30 @@ from ai_weekly_agent.dates import (
     get_date_range_for_days,
     get_default_date_range,
     get_explicit_date_range,
-    weekly_report_filename,
 )
 from ai_weekly_agent.models import DateRange, ResearchRun, VerificationResult
-from ai_weekly_agent.history import HistoryLoadResult, load_history
+from ai_weekly_agent.history import (
+    HistoryLoadResult,
+    check_legacy_publication,
+    load_publication_history,
+)
 from ai_weekly_agent.report import (
     EmptyReportReason,
     ReportError,
     generate_report,
-    save_report,
 )
 from ai_weekly_agent.research import (
     ResearchError,
     research_all_categories,
-    save_research_run,
+)
+from ai_weekly_agent.storage import (
+    AttemptPaths,
+    InvalidPublicationError,
+    PublicationCommitError,
+    PublicationCommitInterrupted,
+    PublicationLock,
+    PublicationStorage,
+    StorageError,
 )
 from ai_weekly_agent.telemetry import (
     RunErrorStage,
@@ -38,17 +48,12 @@ from ai_weekly_agent.telemetry import (
     RunStatus,
     HistoricalStatusCounts,
     HistoryTelemetrySummary,
+    PublicationTelemetrySummary,
     TelemetryRecorder,
     observe_openai_client,
-    run_record_filename,
-    save_run_record,
+    serialize_run_record,
 )
 from ai_weekly_agent.verify import VerificationError, verify_research_run
-
-
-RAW_DATA_DIR = Path("data/raw")
-REPORTS_DIR = Path("reports")
-RUNS_DIR = Path("data/runs")
 
 
 class _CLIUsageError(ValueError):
@@ -108,7 +113,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--overwrite",
         action="store_true",
-        help="replace an existing final report",
+        help="publish a new immutable result for the exact date range",
     )
     return parser
 
@@ -140,6 +145,11 @@ def _candidate_count(research_run: ResearchRun) -> int:
 
 def _utc_now() -> datetime:
     return datetime.now(UTC)
+
+
+def _create_storage() -> PublicationStorage:
+    """Create the one storage boundary rooted at the current working directory."""
+    return PublicationStorage(Path.cwd())
 
 
 def _history_telemetry(
@@ -235,6 +245,8 @@ def _build_run_record(
     curation_statistics: CurationStatistics | None,
     raw_research_path: Path | None,
     report_path: Path | None,
+    publication: PublicationTelemetrySummary,
+    run_record_path: Path,
 ) -> RunRecord | None:
     finished_at = _utc_now()
     if finished_at < started_at:
@@ -289,48 +301,177 @@ def _build_run_record(
         ),
         curated_item_count=curated_item_count,
         history=_history_telemetry(history_result, curation_statistics),
+        publication=publication,
         raw_research_path=raw_research_path,
         report_path=report_path,
-        run_record_path=RUNS_DIR / run_record_filename(date_range),
+        run_record_path=run_record_path,
     )
 
 
-def _save_run_record_best_effort(run_record: RunRecord | None) -> Path | None:
+def _save_run_record_best_effort(
+    run_record: RunRecord | None,
+    *,
+    storage: PublicationStorage,
+    attempt: AttemptPaths,
+    lock: PublicationLock,
+) -> Path | None:
     if run_record is None:
         return None
     try:
-        return save_run_record(run_record, output_dir=RUNS_DIR)
-    except OSError as exc:
+        content = serialize_run_record(run_record)
+        return storage.write_attempt_run_record(
+            attempt,
+            content,
+            lock=lock,
+        )
+    except (OSError, ValueError, StorageError) as exc:
         print(f"Warning: Could not save run telemetry: {exc}", file=sys.stderr)
         return None
 
 
-def main(argv: Sequence[str] | None = None) -> int:
-    """Run the synchronous weekly pipeline and return a process exit code."""
-    parser = _build_parser()
-
-    try:
-        args = parser.parse_args(argv)
-        date_range = _determine_date_range(args)
-    except _CLIUsageError as exc:
-        print(f"Error: {exc}", file=sys.stderr)
-        print(f"Try '{parser.prog} --help' for usage.", file=sys.stderr)
-        return 2
-    except KeyboardInterrupt:
-        print("Interrupted by user.", file=sys.stderr)
-        return 130
-
-    print(f"AI Weekly Agent v{__version__}")
-    print()
-    print(
-        "Reporting period: "
-        f"{date_range.start.isoformat()} -> {date_range.end.isoformat()}"
+def _publication_summary(
+    run_id: str,
+    state: str,
+    durability: str,
+) -> PublicationTelemetrySummary:
+    confirmed: bool | None = None
+    if state == "published":
+        confirmed = durability == "confirmed"
+    return PublicationTelemetrySummary(
+        run_id=run_id,
+        state=state,
+        durability_confirmed=confirmed,
     )
-    print()
 
-    intended_report = REPORTS_DIR / weekly_report_filename(date_range)
-    if intended_report.exists() and not args.overwrite:
-        print(f"Error: Report already exists: {intended_report}", file=sys.stderr)
+
+def _preflight_publication(
+    date_range: DateRange,
+    *,
+    storage: PublicationStorage,
+    overwrite: bool,
+) -> bool:
+    try:
+        publication = storage.read_publication(date_range)
+    except InvalidPublicationError as exc:
+        print(
+            "Error: Existing exact-range publication is invalid or unreadable: "
+            f"{exc}",
+            file=sys.stderr,
+        )
+        return False
+
+    if publication is not None:
+        if not overwrite:
+            print(
+                "Error: A publication already exists for this exact date "
+                f"range: {publication.manifest_path}",
+                file=sys.stderr,
+            )
+            return False
+        return True
+
+    legacy = check_legacy_publication(date_range, storage=storage)
+    if legacy.state == "invalid":
+        diagnostic = legacy.diagnostic
+        detail = diagnostic.message if diagnostic is not None else "unknown"
+        print(
+            "Error: Exact-range legacy publication cannot be safely confirmed: "
+            f"{detail}",
+            file=sys.stderr,
+        )
+        return False
+    if legacy.state == "published" and not overwrite:
+        print(
+            "Error: A legacy publication already exists for this exact date "
+            "range; use --overwrite to publish a new immutable revision.",
+            file=sys.stderr,
+        )
+        return False
+    return True
+
+
+def _attempt_record(
+    *,
+    date_range: DateRange,
+    started_at: datetime,
+    status: RunStatus,
+    error_stage: RunErrorStage | None,
+    config: AppConfig,
+    recorder: TelemetryRecorder,
+    research_run: ResearchRun | None,
+    verification_result: VerificationResult | None,
+    curated_item_count: int | None,
+    history_result: HistoryLoadResult | None,
+    curation_statistics: CurationStatistics | None,
+    raw_path: Path | None,
+    report_path: Path | None,
+    publication: PublicationTelemetrySummary,
+    storage: PublicationStorage,
+    attempt: AttemptPaths,
+    lock: PublicationLock,
+) -> Path | None:
+    try:
+        run_record_path = storage.attempt_run_record_path(attempt, lock=lock)
+        record = _build_run_record(
+            date_range=date_range,
+            started_at=started_at,
+            status=status,
+            error_stage=error_stage,
+            config=config,
+            recorder=recorder,
+            research_run=research_run,
+            verification_result=verification_result,
+            curated_item_count=curated_item_count,
+            history_result=history_result,
+            curation_statistics=curation_statistics,
+            raw_research_path=raw_path,
+            report_path=report_path,
+            publication=publication,
+            run_record_path=run_record_path,
+        )
+        return _save_run_record_best_effort(
+            record,
+            storage=storage,
+            attempt=attempt,
+            lock=lock,
+        )
+    except (OSError, ValueError, StorageError) as exc:
+        print(f"Warning: Could not save run telemetry: {exc}", file=sys.stderr)
+        return None
+
+
+def _print_commit_failure(
+    state: str,
+    durability: str,
+    error: BaseException,
+) -> None:
+    if state == "published":
+        print(
+            "Error: The report is published, but publication durability is "
+            f"unconfirmed: {error}",
+            file=sys.stderr,
+        )
+    elif state == "unknown":
+        print(
+            f"Error: Publication outcome is unknown: {error}",
+            file=sys.stderr,
+        )
+    else:
+        print(f"Error: The attempt was not published: {error}", file=sys.stderr)
+
+
+def _run_locked(
+    date_range: DateRange,
+    *,
+    overwrite: bool,
+    storage: PublicationStorage,
+    lock: PublicationLock,
+) -> int:
+    if not _preflight_publication(
+        date_range,
+        storage=storage,
+        overwrite=overwrite,
+    ):
         return 1
 
     try:
@@ -339,9 +480,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     except (ValueError, OSError) as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return 1
-    except KeyboardInterrupt:
-        print("Interrupted by user.", file=sys.stderr)
-        return 130
+
+    try:
+        attempt = storage.allocate_attempt(date_range, lock=lock)
+    except StorageError as exc:
+        print(f"Error: Could not allocate run attempt: {exc}", file=sys.stderr)
+        return 1
 
     run_started_at = _utc_now()
     recorder = TelemetryRecorder()
@@ -353,6 +497,37 @@ def main(argv: Sequence[str] | None = None) -> int:
     raw_path: Path | None = None
     report_path: Path | None = None
     current_stage: RunErrorStage = "research"
+    not_published = _publication_summary(
+        attempt.run_id,
+        "not_published",
+        "not_applicable",
+    )
+
+    def save_attempt_record(
+        *,
+        status: RunStatus,
+        error_stage: RunErrorStage | None,
+        publication: PublicationTelemetrySummary,
+    ) -> Path | None:
+        return _attempt_record(
+            date_range=date_range,
+            started_at=run_started_at,
+            status=status,
+            error_stage=error_stage,
+            config=config,
+            recorder=recorder,
+            research_run=research_run,
+            verification_result=verification_result,
+            curated_item_count=curated_item_count,
+            history_result=history_result,
+            curation_statistics=curation_statistics,
+            raw_path=raw_path,
+            report_path=report_path,
+            publication=publication,
+            storage=storage,
+            attempt=attempt,
+            lock=lock,
+        )
 
     try:
         base_client = create_openai_client(config)
@@ -375,14 +550,15 @@ def main(argv: Sequence[str] | None = None) -> int:
 
         current_stage = "save"
         print("[2/5] Saving original research...")
-        raw_path = save_research_run(research_run, output_dir=RAW_DATA_DIR)
+        raw_path = storage.write_raw(attempt, research_run, lock=lock).path
         print("Raw research saved:")
         print(raw_path)
 
         current_stage = "verify"
         print("[3/5] Verifying research evidence...")
         verification_result = verify_research_run(
-            research_run, require_provenance=True,
+            research_run,
+            require_provenance=True,
         )
         accepted_count = _candidate_count(verification_result.accepted_run)
         rejected_count = len(verification_result.rejected_item_ids)
@@ -398,11 +574,9 @@ def main(argv: Sequence[str] | None = None) -> int:
 
         current_stage = "curate"
         print("Loading local report history...")
-        history_result = load_history(
+        history_result = load_publication_history(
             date_range,
-            runs_dir=RUNS_DIR,
-            raw_dir=RAW_DATA_DIR,
-            reports_dir=REPORTS_DIR,
+            storage=storage,
         )
         _warn_about_history(history_result)
 
@@ -436,88 +610,145 @@ def main(argv: Sequence[str] | None = None) -> int:
                 config,
                 empty_reason=_empty_report_reason(curation_statistics),
             )
+
         current_stage = "save"
-        report_path = save_report(
-            date_range,
+        report_path = storage.write_report(
+            attempt,
             markdown,
-            output_dir=REPORTS_DIR,
-            overwrite=args.overwrite,
-        )
-        print("Weekly report saved:")
+            lock=lock,
+        ).path
+        print("Attempt report saved:")
         print(report_path)
+        commit = storage.publish(
+            attempt,
+            application_version=__version__,
+            lock=lock,
+            overwrite=overwrite,
+        )
+    except PublicationCommitError as exc:
+        publication = _publication_summary(
+            attempt.run_id,
+            exc.state,
+            exc.durability,
+        )
+        save_attempt_record(
+            status="failed",
+            error_stage="save",
+            publication=publication,
+        )
+        _print_commit_failure(exc.state, exc.durability, exc)
+        return 1
+    except PublicationCommitInterrupted as exc:
+        publication = _publication_summary(
+            attempt.run_id,
+            exc.state,
+            exc.durability,
+        )
+        save_attempt_record(
+            status="failed",
+            error_stage="save",
+            publication=publication,
+        )
+        _print_commit_failure(exc.state, exc.durability, exc)
+        print("Interrupted by user.", file=sys.stderr)
+        return 130
     except (
         ResearchError,
         VerificationError,
         CuratorError,
         ReportError,
         OSError,
+        StorageError,
     ) as exc:
-        failed_record = _build_run_record(
-            date_range=date_range,
-            started_at=run_started_at,
+        save_attempt_record(
             status="failed",
             error_stage=current_stage,
-            config=config,
-            recorder=recorder,
-            research_run=research_run,
-            verification_result=verification_result,
-            curated_item_count=curated_item_count,
-            history_result=history_result,
-            curation_statistics=curation_statistics,
-            raw_research_path=raw_path,
-            report_path=report_path,
+            publication=not_published,
         )
-        _save_run_record_best_effort(failed_record)
         print(f"Error: {exc}", file=sys.stderr)
         return 1
     except KeyboardInterrupt:
-        failed_record = _build_run_record(
-            date_range=date_range,
-            started_at=run_started_at,
+        save_attempt_record(
             status="failed",
             error_stage=current_stage,
-            config=config,
-            recorder=recorder,
-            research_run=research_run,
-            verification_result=verification_result,
-            curated_item_count=curated_item_count,
-            history_result=history_result,
-            curation_statistics=curation_statistics,
-            raw_research_path=raw_path,
-            report_path=report_path,
+            publication=not_published,
         )
-        _save_run_record_best_effort(failed_record)
-        print("Interrupted by user.", file=sys.stderr)
+        print(
+            "Interrupted by user. This attempt was not published.",
+            file=sys.stderr,
+        )
         return 130
 
-    success_record = _build_run_record(
-        date_range=date_range,
-        started_at=run_started_at,
-        status="success",
-        error_stage=None,
-        config=config,
-        recorder=recorder,
-        research_run=research_run,
-        verification_result=verification_result,
-        curated_item_count=curated_item_count,
-        history_result=history_result,
-        curation_statistics=curation_statistics,
-        raw_research_path=raw_path,
-        report_path=report_path,
+    publication = _publication_summary(
+        attempt.run_id,
+        commit.state,
+        commit.durability,
     )
-    run_record_path = _save_run_record_best_effort(success_record)
+    try:
+        run_record_path = save_attempt_record(
+            status="success",
+            error_stage=None,
+            publication=publication,
+        )
+    except KeyboardInterrupt:
+        print(
+            "Interrupted after publication; telemetry may be incomplete.",
+            file=sys.stderr,
+        )
+        return 130
     if run_record_path is not None:
         print("Run telemetry saved:")
         print(run_record_path)
 
+    print("Weekly report published:")
+    print(commit.publication.report_path)
     totals = recorder.aggregate()
     print(f"API calls: {totals.logical_call_count}")
     if totals.usage_complete:
         print(f"Tokens: {totals.total_tokens}")
     else:
         print("Tokens: incomplete telemetry")
-
     return 0
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    """Run the synchronous weekly pipeline and return a process exit code."""
+    parser = _build_parser()
+    try:
+        args = parser.parse_args(argv)
+        date_range = _determine_date_range(args)
+    except _CLIUsageError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        print(f"Try '{parser.prog} --help' for usage.", file=sys.stderr)
+        return 2
+    except KeyboardInterrupt:
+        print("Interrupted by user.", file=sys.stderr)
+        return 130
+
+    print(f"AI Weekly Agent v{__version__}")
+    print()
+    print(
+        "Reporting period: "
+        f"{date_range.start.isoformat()} -> {date_range.end.isoformat()}"
+    )
+    print()
+
+    try:
+        storage = _create_storage()
+        lock = storage.acquire_lock(date_range)
+        with lock:
+            return _run_locked(
+                date_range,
+                overwrite=args.overwrite,
+                storage=storage,
+                lock=lock,
+            )
+    except StorageError as exc:
+        print(f"Error: Storage operation failed: {exc}", file=sys.stderr)
+        return 1
+    except KeyboardInterrupt:
+        print("Interrupted by user.", file=sys.stderr)
+        return 130
 
 
 if __name__ == "__main__":

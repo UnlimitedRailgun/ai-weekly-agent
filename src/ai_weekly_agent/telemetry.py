@@ -32,6 +32,8 @@ RunErrorStage = Literal[
     "telemetry",
 ]
 HistoryLoadState = Literal["complete", "partial", "unavailable"]
+PublicationState = Literal["not_published", "published", "unknown"]
+_RUN_ID_PATTERN = r"^[0-9a-f]{32}$"
 
 
 class ApiCallRecord(BaseModel):
@@ -157,6 +159,29 @@ class HistoryTelemetrySummary(BaseModel):
         return self
 
 
+class PublicationTelemetrySummary(BaseModel):
+    """Content-free publication outcome for this exact attempt."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    run_id: str = Field(pattern=_RUN_ID_PATTERN)
+    state: PublicationState
+    durability_confirmed: bool | None = None
+
+    @model_validator(mode="after")
+    def validate_outcome(self) -> "PublicationTelemetrySummary":
+        if self.state == "published":
+            if self.durability_confirmed is None:
+                raise ValueError(
+                    "published state requires a durability observation"
+                )
+        elif self.durability_confirmed is not None:
+            raise ValueError(
+                "only published state may carry a durability observation"
+            )
+        return self
+
+
 class RunRecord(BaseModel):
     """Operational summary for one eventual CLI run, including partial runs."""
 
@@ -183,6 +208,7 @@ class RunRecord(BaseModel):
     verification_information_count: int | None = Field(default=None, ge=0)
     curated_item_count: int | None = Field(default=None, ge=0)
     history: HistoryTelemetrySummary | None = None
+    publication: PublicationTelemetrySummary | None = None
     raw_research_path: Path | None = None
     report_path: Path | None = None
     run_record_path: Path | None = None
@@ -384,8 +410,7 @@ def save_run_record(
             delete=False,
         ) as temporary_file:
             temporary_path = Path(temporary_file.name)
-            temporary_file.write(run_record.model_dump_json(indent=2))
-            temporary_file.write("\n")
+            temporary_file.write(serialize_run_record(run_record).decode("utf-8"))
             temporary_file.flush()
             os.fsync(temporary_file.fileno())
 
@@ -399,6 +424,11 @@ def save_run_record(
         raise
 
     return target
+
+
+def serialize_run_record(run_record: RunRecord) -> bytes:
+    """Serialize one RunRecord for a storage-owned persistence boundary."""
+    return (run_record.model_dump_json(indent=2) + "\n").encode("utf-8")
 
 
 def _utc_now() -> datetime:

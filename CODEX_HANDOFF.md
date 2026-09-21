@@ -1,148 +1,157 @@
-# Codex Handoff — AI Weekly Agent v0.5 Phase 6C Pre-Commit Record
+# Codex Handoff — AI Weekly Agent v0.6 Phase 6A
 
 ## Task
 
-Verify, explicitly stage, and create one local v0.5.0 release commit with
-subject `chore: release v0.5.0` from the 19 approved cumulative files. This
-handoff is finalized before the commit and intentionally does not claim the
-commit succeeded or contain its eventual SHA.
+Prepare the reviewed v0.6 candidate locally as version 0.6.0, refresh only its
+editable installation metadata, run guarded offline verification, and draft
+release notes without staging, committing, tagging, pushing, or publishing.
 
 ## Status
 
-**Pre-commit verification complete; the single authorized local commit is ready
-to be attempted.**
-
-Tagging, pushing, publication, GitHub operations, remote verification, model
-requests, and all other network operations remain unauthorized.
+Completed. Local release preparation is `READY_WITH_DOCUMENTED_LIMITATIONS`.
+The local project and editable distribution are version 0.6.0. Version 0.6.0
+has not been committed, tagged, pushed, or published; the released baseline
+remains v0.5.0 at `ecb4a98470fb7ce372dd38d7bbfc3c5ec638ed74`.
 
 ## Summary
 
-The actual starting state matched the reviewed Phase 6B handoff: branch `main`,
-baseline `d06ac23e4dfd9f9460714f10c950afc666ad1fae`, empty index, 16 modified
-tracked files, three reviewed untracked files, and `0.5.0` in both authoritative
-version declarations. The cumulative diff and new files remain consistent with
-the reviewed Historical Awareness / Cross-Run Novelty work.
+The user explicitly accepted the Phase 5 residual risks only for local v0.6.0
+release preparation. The two authoritative version declarations now read
+0.6.0, two assertions for the current producing application version were
+updated, current-status documentation was synchronized, and a clearly marked
+`DRAFT / NOT PUBLISHED` release-notes section was added to
+`docs/v0.6-validation.md`.
 
-The full offline suite, equivalent socket-blocked suite, and both help-only CLI
-paths passed. The proposed scope contains no detected secret, generated runtime
-artifact, temporary evaluator, capture, ledger, or unrelated file. No new
-implementation defect was found.
+The existing environment refreshed the editable package with no index,
+dependency resolution, or build isolation. Source, import, project, and
+installed-distribution versions all resolve to 0.6.0. The tested import comes
+from the repository `src/` tree. The full offline suite and both help paths
+passed under the inherited socket/DNS guard with zero formal network attempts.
+
+The archived Phase 4/5 evidence and repository runtime artifacts retained their
+pre-Phase-6A hashes. All Phase 5 candidate production files except the approved
+`__init__.py` version constant remain byte-identical; prompts are unchanged.
+No model, web-search, weekly-pipeline, live-evaluator, Git remote, or other
+network operation ran.
 
 ## Files Changed
 
-Phase 6C changed only these pre-commit records before validation:
+Phase 6A itself changed these eight repository paths:
 
-- `docs/v0.5-validation.md` — added the authorization boundary, exact baseline,
-  offline results, and explicit pre-commit-record semantics.
-- `CODEX_HANDOFF.md` — replaced the Phase 6B handoff with this pre-commit record.
+- `pyproject.toml` — project version only, 0.5.0 to 0.6.0.
+- `src/ai_weekly_agent/__init__.py` — `__version__` only, 0.5.0 to 0.6.0.
+- `tests/test_main.py` — two current-application version expectations only.
+- `README.md` — current local v0.6.0 preparation and validation status.
+- `AGENTS.md` — authoritative current scope/status and accepted-risk boundary.
+- `docs/v0.6-plan.md` — appended current Phase 6A status without rewriting the
+  earlier plan record.
+- `docs/v0.6-validation.md` — appended the risk decision, local preparation
+  evidence, and draft release notes.
+- `CODEX_HANDOFF.md` — replaced the Phase 5 handoff with this Phase 6A state.
 
-No production logic, prompt, schema, retrieval, scoring, threshold,
-configuration, dependency, version, or test assertion changed in Phase 6C.
+No production behavior, prompt, schema, dependency, runtime configuration,
+historical fixture, generated research/report/run artifact, or `.env` file was
+changed. The editable build refreshed ignored `src/ai_weekly_agent.egg-info/`
+and `.venv` distribution metadata; neither belongs in the commit candidate.
 
-The exact approved cumulative commit scope is:
+The complete reviewed v0.6 commit allowlist is exactly:
 
-- `AGENTS.md`
-- `CODEX_HANDOFF.md`
-- `README.md`
-- `docs/v0.5-validation.md`
-- `prompts/curate.md`
-- `pyproject.toml`
-- `src/ai_weekly_agent/__init__.py`
-- `src/ai_weekly_agent/curate.py`
-- `src/ai_weekly_agent/history.py`
-- `src/ai_weekly_agent/main.py`
-- `src/ai_weekly_agent/models.py`
-- `src/ai_weekly_agent/report.py`
-- `src/ai_weekly_agent/telemetry.py`
-- `tests/test_curate.py`
-- `tests/test_history.py`
-- `tests/test_main.py`
-- `tests/test_models.py`
-- `tests/test_report.py`
-- `tests/test_telemetry.py`
+- Production: `src/ai_weekly_agent/history.py`,
+  `src/ai_weekly_agent/main.py`, `src/ai_weekly_agent/storage.py`, and
+  `src/ai_weekly_agent/telemetry.py`.
+- Version: `pyproject.toml` and `src/ai_weekly_agent/__init__.py`.
+- Tests: `tests/test_locking.py`, `tests/test_main.py`,
+  `tests/test_publication_history.py`, `tests/test_storage.py`, and
+  `tests/test_telemetry.py`.
+- Configuration/ignore: `.gitignore`.
+- Documentation: `AGENTS.md`, `CODEX_HANDOFF.md`, `README.md`,
+  `docs/v0.6-plan.md`, and `docs/v0.6-validation.md`.
 
 ## Important Decisions
 
-- The user accepted the documented false-`REPEAT` suppression risk for v0.5.0,
-  but the semantic limitation remains unresolved.
-- The frozen `candidate_005` expectation remains `UNCERTAIN`; both evaluated
-  history-enabled responses remain observed `REPEAT` results. Phase 5B and
-  Phase 5D are not relabelled as complete semantic passes.
-- Offline passing tests do not prove model semantic correctness. Live selected
-  historical-context rendering and a full v0.5 weekly pipeline remain untested.
-- Local package/application metadata is `0.5.0`; RunRecord schema remains 1.
-- This handoff is a submission-bound pre-commit record. The final execution
-  response, not a post-commit repository edit, must report the resulting commit
-  SHA, tree, parent, file list, and final status.
-
-## Baseline and Scope Checks
-
-- Branch: `main`.
-- Full baseline SHA: `d06ac23e4dfd9f9460714f10c950afc666ad1fae`.
-- Baseline subject: `chore: release v0.4.0`.
-- Baseline tree: `624809da893cef42a80325741458d726244ae6c1`.
-- Initial index: empty.
-- Initial worktree: exactly 16 modified tracked and three reviewed untracked
-  files, matching the 19-file approved list.
-- `pyproject.toml` version: `0.5.0`.
-- `src/ai_weekly_agent/__init__.py` version: `0.5.0`.
-- Existing local tags were inspected read-only. Phase 6C does not authorize
-  creating, moving, or deleting a tag.
-- `.env` and generated `data/raw/*.json`, `data/runs/*.json`, and `reports/*.md`
-  paths remain ignored and outside the proposed set.
+- The user accepted, without marking fixed, the documented single-source,
+  vendor-report, PrismML classification, matched-history live-coverage,
+  candidate_005 false-`REPEAT`, per-tool evidence, timing-reconciliation,
+  Linux/WSL locking, legacy-path, hard-interrupt, and durability limitations.
+- The controlled live run remains historical evidence from a candidate whose
+  application metadata was 0.5.0. The locally versioned 0.6.0 candidate was not
+  live-tested again.
+- RunRecord schema remains 1; PublicationManifest schema remains 1. Historical
+  0.5.0 fixture and artifact values were preserved.
+- Local preparation does not imply a commit or release. Staging, commit, tag,
+  push, GitHub Release, remote verification, and publication remain
+  unauthorized.
 
 ## Commands / Tests Run
 
-- `PYTHONPATH=src .venv/bin/python -m pytest`
-- Initial unavailable-helper attempt:
-  `PYTHONPATH=src .venv/bin/python /tmp/ai_weekly_socket_blocked_pytest.py -q`
-- Equivalent guarded suite:
-  `PYTHONPATH=/tmp/ai_weekly_phase6c_guard:src .venv/bin/python -m pytest -q`
-- `PYTHONPATH=/tmp/ai_weekly_phase6c_guard:src .venv/bin/python -m ai_weekly_agent.main --help`
-- `PYTHONPATH=/tmp/ai_weekly_phase6c_guard:src .venv/bin/ai-weekly --help`
-- `git diff --check`
-- `git status --short --branch --untracked-files=all`
-- `git diff --cached --name-status`
-- `git diff --name-status v0.4.0 --`
-- `git diff --stat v0.4.0 --`
-- `git ls-files --others --exclude-standard`
-- `git check-ignore -v .env data/raw/2099-01-01_to_2099-01-07.json data/runs/2099-01-01_to_2099-01-07.json reports/2099-W01.md`
-- Read-only `rg`, `find`, `git log`, `git rev-parse`, `git show-ref`, and
-  `git tag` checks for scope, versions, secrets, artifacts, baseline, and tags.
-
-No normal weekly CLI command or live evaluator was run.
+- Editable refresh:
+  `PIP_DISABLE_PIP_VERSION_CHECK=1 AI_WEEKLY_NETWORK_GUARD_LOG=/tmp/ai_weekly_v06_phase6a_pip_network.log PYTHONPATH=/tmp/ai_weekly_v06_phase2a_guard .venv/bin/python -m pip install --no-index --no-deps --no-build-isolation -e .`
+- Focused tests:
+  `AI_WEEKLY_NETWORK_GUARD_LOG=/tmp/ai_weekly_v06_phase6a_focused_network.log PYTHONPATH=/tmp/ai_weekly_v06_phase2a_guard:src .venv/bin/python -m pytest tests/test_main.py tests/test_telemetry.py`.
+- Complete suite:
+  `AI_WEEKLY_NETWORK_GUARD_LOG=/tmp/ai_weekly_v06_phase6a_full_network.log PYTHONPATH=/tmp/ai_weekly_v06_phase2a_guard:src .venv/bin/python -m pytest`.
+- Module and installed-entry help were run separately from `/tmp`, without
+  `PYTHONPATH=src`, using `/home/shanl/ai-weekly-agent/.venv/bin/python -m
+  ai_weekly_agent.main --help` and
+  `/home/shanl/ai-weekly-agent/.venv/bin/ai-weekly --help`, each under the
+  inherited guard.
+- A version/import check from `/tmp`, without `PYTHONPATH=src`, inspected both
+  source declarations, the imported value/path, and installed distribution
+  value/path.
+- Read-only closure used `sha256sum -c` against the pre-change archive and
+  repository-artifact snapshots, byte comparisons against the archived
+  candidate, candidate-freeze test hashes, `git diff --check`, untracked
+  whitespace scans, `git check-ignore -v --no-index`, exact status-scope
+  comparison, and a separate fork-child network-blocking probe.
 
 ## Test Results
 
-- Full offline suite: **655 passed**.
-- Equivalent socket/DNS-blocked full suite: **655 passed**,
-  `NETWORK_ATTEMPTS=0`.
-- Module help-only CLI: exit 0, `NETWORK_ATTEMPTS=0`.
-- Installed console-script help-only CLI: exit 0, `NETWORK_ATTEMPTS=0`.
-- `git diff --check`: passed before the final pre-commit document update; it
-  must be rerun on final content before staging.
-- The missing legacy `/tmp` helper attempt exited 2 before pytest started and
-  made no network request. The replacement guard lives only under `/tmp`.
-- OpenAI/web/GitHub/other network requests: zero.
+- Editable refresh: succeeded; installed `ai-weekly-agent 0.6.0`; no
+  third-party package was installed, removed, or upgraded; formal network
+  attempts: 0 across the parent and three guarded build subprocesses.
+- Four version checks: project 0.6.0, source constant 0.6.0, imported version
+  0.6.0, and installed distribution 0.6.0.
+- Import path:
+  `/home/shanl/ai-weekly-agent/src/ai_weekly_agent/__init__.py`.
+- Distribution metadata:
+  `/home/shanl/ai-weekly-agent/.venv/lib/python3.12/site-packages/ai_weekly_agent-0.6.0.dist-info`.
+- Focused suite: 175 passed in 4.18 seconds.
+- Complete suite: 800 passed in 7.20 seconds; no failures or skips.
+- Module help and installed-entry help: exit 0 each.
+- Formal install, version, test, and help logs: 0 network attempts. The separate
+  deliberate child probe was blocked and recorded its one expected attempt only
+  in the probe log.
+- Archive, runtime-artifact, candidate-delta, diff, whitespace, ignore, secret-
+  literal, and exact 17-path scope checks: passed.
+- Live/model/web/remote requests in Phase 6A: zero.
 
 ## Known Issues
 
-- The `candidate_005` false-`REPEAT` discrepancy remains unresolved.
-- False suppression of useful stories on other inputs remains possible and
-  unmeasured.
-- Live selected-history rendering and the full v0.5 weekly pipeline remain
-  untested.
-- At the time this pre-commit record was finalized, v0.5.0 had not yet been
-  committed, tagged, pushed, or published.
+- Eleven selected stories in the one controlled live sample were single-source;
+  vendor claims and the PrismML/PR Newswire classification remain content risks.
+- Live matched-history classification, `REPEAT` suppression, and selected
+  matched-context rendering remain uncovered. The candidate_005 false-`REPEAT`
+  discrepancy remains unresolved.
+- The 27 observed web-search output items lack retained per-item status/action
+  and exact completed, unique, page, or billing counts.
+- The saved wall interval minus summed wrapper durations is -30.774564 seconds;
+  its cause and current dollar cost remain unknown.
+- Locking is cooperative and Linux/WSL-specific. Non-cooperating writers,
+  hard-interrupt telemetry, strict legacy cwd behavior, orphan cleanup,
+  recovery/migration, and universal filesystem durability remain bounded as
+  documented.
 
 ## Open Questions
 
-None for the authorized local commit. Any tag, push, remote check, GitHub
-Release, or publication requires separate explicit authorization.
+- Whether to authorize a separate, exact-path local release commit phase.
+- Whether tag creation, remote push, and GitHub publication should later be
+  authorized as separate operations.
+- Whether a future version should retain minimal content-free tool-item status
+  counts; this is not a v0.6.0 feature.
 
 ## Recommended Next Step
 
-Rerun all required offline checks against this finalized pre-commit content. If
-they pass, explicitly stage exactly the 19 approved paths, verify the index and
-record its tree SHA, then create one local commit with subject
-`chore: release v0.5.0`. Afterward perform read-only local verification and stop.
+Review the local release-preparation receipt and draft release notes. If the
+candidate is accepted, separately authorize an exact-path local v0.6.0 release
+commit. Do not infer authorization for staging, commit, tag, push, GitHub
+Release, another live run, or publication from this handoff.

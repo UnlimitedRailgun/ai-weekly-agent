@@ -1,10 +1,13 @@
 # AI & Computer Engineering Weekly Research Agent
 
 This project produces a beginner-friendly weekly overview of important AI and
-Computer Engineering developments for university students. Version 0.4.0 is
-the released baseline. The local worktree is prepared as Version 0.5.0 but is
-not published. It adds local historical awareness while keeping the application
-small, synchronous, and local-first.
+Computer Engineering developments for university students. Version 0.5.0
+remains the released baseline. The local working tree is versioned `0.6.0` for
+release preparation but has not been committed, tagged, pushed, or released.
+The v0.6 candidate focuses on reliable weekly runs and history integrity. The
+normal CLI integrates the offline-tested immutable persistence core,
+manifest-backed history reader, exact-range lock, and per-attempt telemetry.
+It has completed one controlled live validation.
 
 ```text
 Research ×6
@@ -15,8 +18,25 @@ Research ×6
 -> Grounded Report
 -> local consistency validation
 -> deterministic Markdown
--> RunRecord
+-> publish exact-range manifest
+-> per-attempt RunRecord
 ```
+
+### Version 0.6.0 local release-preparation status
+
+`src/ai_weekly_agent/storage.py` now provides an offline-tested foundation for
+immutable per-attempt raw/report artifacts, exact-range publication manifests,
+authenticated byte snapshots, and non-blocking Linux/WSL `fcntl` locks.
+`history.load_publication_history()` explicitly combines authenticated
+manifest publications with strict legacy history under one trusted storage
+root. Manifest presence is authoritative for the exact date range; an invalid
+or empty publication never falls back to same-range legacy data. The normal CLI
+creates one `PublicationStorage` at the current working directory, holds the
+exact-range lock from preflight through telemetry finalization, and passes that
+same object to publication and history. The old standalone `load_history()`
+and save functions remain compatible, but the normal path no longer
+double-writes legacy files. See `docs/v0.6-plan.md` for the exact compatibility
+and diagnostic rules.
 
 ## Architecture
 
@@ -95,9 +115,9 @@ offline-tested rather than demonstrated live by this run. Neither offline tests
 nor this single live sample independently verify webpage semantics or establish
 universal model compliance. No additional live run is implied or authorized.
 
-### Version 0.5 historical awareness (local release preparation; not published)
+### Version 0.5 historical awareness (released)
 
-The v0.5 development code reconstructs prior coverage from three existing local
+Version 0.5 reconstructs prior coverage from three existing local
 artifacts: a successful RunRecord, its canonical raw `ResearchRun`, and its
 canonical Markdown report. Raw-only candidates and stories absent from the
 report are not treated as previously reported. Reconciliation requires matching
@@ -165,8 +185,9 @@ including after a reviewed prompt clarification; its frozen expectation remains
 `UNCERTAIN`. The response was structurally valid, so the local validator could
 not reject the unsupported semantic judgment. At the observed score of 1.00,
 changing only the status would not have selected that case, but false suppression
-of useful items on other inputs remains possible and unmeasured. Risk acceptance
-is pending user decision. These evaluations did not exercise a live selected
+of useful items on other inputs remains possible and unmeasured. The user
+accepted this documented risk for the v0.5.0 release; the semantic discrepancy
+remains unresolved. These evaluations did not exercise a live selected
 historical-context path or a live full weekly pipeline.
 
 ### Grounded reporting
@@ -186,11 +207,23 @@ not independently fact-check the semantic content of source webpages.
 
 ### Persistence and telemetry
 
-Final Markdown reports are stored under `reports/`. A concise operational
-RunRecord is atomically written to `data/runs/` after success and is attempted
-after pipeline failures. RunRecord persistence is best-effort: failure to save
-telemetry cannot invalidate an otherwise successful report or replace the
-primary pipeline error.
+The normal CLI reserves one immutable `run_id` attempt under a single storage
+root and writes:
+
+```text
+data/raw/<start>_to_<end>/<run_id>.json
+reports/<start>_to_<end>/<run_id>.md
+data/runs/attempts/<start>_to_<end>/<run_id>/run.json
+data/runs/published/<start>_to_<end>.json
+data/runs/locks/<start>_to_<end>.lock
+```
+
+The publication manifest is written last and is the authority for published
+history. Raw and report artifacts are immutable; failed attempts and their
+telemetry never become history merely by existing. Per-attempt RunRecord
+persistence is best-effort: failure to save telemetry cannot invalidate an
+otherwise successful publication or replace the primary pipeline error.
+Legacy top-level artifacts remain read-only compatible and are not migrated.
 
 RunRecords contain logical call stage, status, supported error metadata, token
 usage, and Research category identity when the category-aware Research path is
@@ -214,8 +247,10 @@ with zero.
 
 Generated raw Research JSON, RunRecord JSON, and Markdown reports are local
 runtime artifacts and are ignored by Git by default. The RunRecord schema stays
-at version 1 in this release; its `application_version` identifies the producing
-application release separately.
+at version 1 and has an optional strict `publication` summary containing only
+this attempt's run ID, observed state, and durability confirmation. Older
+records without this field remain readable by the current model; no
+compatibility promise is made for untested external readers.
 
 Each run researches these six canonical categories:
 
@@ -295,11 +330,17 @@ Or choose a positive number of inclusive calendar days ending today:
 ai-weekly --days 7
 ```
 
-Final reports are protected from silent replacement. To replace an existing report intentionally, use:
+An existing publication for the exact date range is blocked before
+configuration or client creation. To publish a new immutable attempt and
+advance only that exact range's manifest, use:
 
 ```bash
 ai-weekly --overwrite
 ```
+
+`--overwrite` does not mutate or delete prior artifacts, does not affect a
+different range in the same ISO week, and does not repair invalid publication
+metadata. A present invalid exact-range manifest fails closed in both modes.
 
 Each run researches all six categories sequentially, preserves the original
 structured research, verifies evidence metadata locally, curates accepted
@@ -351,8 +392,8 @@ The application does not schedule or automatically trigger weekly runs.
   both evaluated history-enabled runs. It scored below the selection threshold
   in those samples, but low observed scores are not a general safeguard against
   false suppression on other inputs. This risk is unmeasured. The user accepted
-  it as a known limitation for v0.5.0 release preparation; the semantic issue
-  remains unresolved, and publication has not been authorized.
+  it as a known limitation for the released v0.5.0 baseline; the semantic issue
+  remains unresolved.
 - The v0.5 live evaluations were Curate-only and selected no stories. They did
   not exercise live selected historical-context rendering or a live full weekly
   pipeline.
@@ -363,8 +404,21 @@ The application does not schedule or automatically trigger weekly runs.
   retry attempts, and it does not estimate cost.
 - Reports and telemetry are local files. There is no scheduler or automatic
   delivery.
-- Report filenames use the end date's ISO week; different ranges ending in the
-  same week collide unless intentionally overwritten.
+- The publication lock uses Linux/WSL `fcntl`; unsupported platforms fail
+  normal execution rather than continuing without a lock. Help and CLI usage
+  validation do not initialize storage or require lock support.
+- Publication uses per-file synchronization and an atomic manifest replacement
+  on the tested local filesystem. This is not a general cross-filesystem or
+  power-loss guarantee, and external programs that ignore the lock can still
+  interfere.
+- The v0.6 candidate completed one controlled live weekly pipeline with eight
+  logical calls/eight HTTP attempts, 19 researched and verified candidates,
+  and 12 selected stories. This validates one sample and local-`NEW` history
+  rendering; it does not independently validate webpage truth, matched-history
+  classification, repeat suppression, or general model semantics.
+- The user accepted the documented v0.6 residual risks for local release
+  preparation. Those limitations remain unresolved, and v0.6.0 is not yet
+  committed or published.
 - Databases, RAG, a web UI, and historical analytics remain out of scope.
 
 ## Tests

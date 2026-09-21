@@ -10,9 +10,14 @@ import ai_weekly_agent.main as main_module
 import ai_weekly_agent.curate as curate_module
 import ai_weekly_agent.report as report_module
 import ai_weekly_agent.research as research_module
+import ai_weekly_agent.storage as storage_module
 from ai_weekly_agent.config import AppConfig
 from ai_weekly_agent.curate import CuratorError
-from ai_weekly_agent.history import HistoryDiagnostic, HistoryLoadResult
+from ai_weekly_agent.history import (
+    HistoryDiagnostic,
+    HistoryLoadResult,
+    LegacyPublicationCheck,
+)
 from ai_weekly_agent.models import (
     CategoryResearchResult,
     CuratedItem,
@@ -24,12 +29,28 @@ from ai_weekly_agent.models import (
     Source,
 )
 from ai_weekly_agent.report import ReportError
+from ai_weekly_agent.report import save_report as persist_report
 from ai_weekly_agent.research import (
     RESEARCH_CATEGORIES,
     ResearchError,
     save_research_run as persist_research_run,
 )
-from ai_weekly_agent.telemetry import RunRecord
+from ai_weekly_agent.storage import AttemptPaths, StoredArtifact
+from ai_weekly_agent.storage import (
+    InvalidPublicationError,
+    PublicationCommitError,
+    PublicationCommitInterrupted,
+    PublicationLockBusyError,
+    PublicationLockUnsupportedError,
+    PublicationStorage,
+    StorageError,
+)
+from ai_weekly_agent.telemetry import (
+    RunRecord,
+    TelemetryRecorder,
+    run_record_filename,
+    save_run_record as persist_run_record,
+)
 from ai_weekly_agent.verify import VerificationError, verify_research_run
 
 
@@ -71,6 +92,53 @@ def make_research_run(*items: NewsItem) -> ResearchRun:
             for index, category in enumerate(RESEARCH_CATEGORIES)
         ],
     )
+
+
+def persist_empty_legacy_publication(
+    root: Path,
+    date_range: DateRange,
+) -> tuple[Path, Path, Path]:
+    run = ResearchRun(
+        date_range=date_range,
+        categories=[
+            CategoryResearchResult(category=category, items=[])
+            for category in RESEARCH_CATEGORIES
+        ],
+    )
+    raw_path = persist_research_run(run, output_dir=root / "data" / "raw")
+    markdown = report_module.generate_report(
+        date_range,
+        [],
+        CONFIG,
+        empty_reason="no_prepared_candidates",
+    )
+    report_path = persist_report(
+        date_range,
+        markdown,
+        output_dir=root / "reports",
+    )
+    record_path = root / "data" / "runs" / run_record_filename(date_range)
+    timestamp = datetime(2026, 9, 8, tzinfo=UTC)
+    record = RunRecord(
+        application_version="0.5.0",
+        date_range=date_range,
+        started_at=timestamp,
+        finished_at=timestamp,
+        status="success",
+        api_totals=TelemetryRecorder().aggregate(),
+        researched_category_count=6,
+        researched_candidate_count=0,
+        verification_accepted_count=0,
+        verification_rejected_count=0,
+        verification_warning_count=0,
+        verification_information_count=0,
+        curated_item_count=0,
+        raw_research_path=raw_path,
+        report_path=report_path,
+        run_record_path=record_path,
+    )
+    assert persist_run_record(record, output_dir=record_path.parent) == record_path
+    return raw_path, report_path, record_path
 
 
 def make_history_result(
@@ -132,9 +200,19 @@ def install_pipeline(
         if curated_items is not None
         else [CuratedItem(item=item, final_score=4.0) for item in items]
     )
-    raw_path = tmp_path / "raw" / "research.json"
-    report_path = tmp_path / "reports" / "2026-W37.md"
-    run_record_path = tmp_path / "runs" / "research.json"
+    raw_path = (
+        tmp_path / "data" / "raw" / "range" / ("a" * 32) / "raw.json"
+    )
+    report_path = tmp_path / "reports" / "range" / "report.md"
+    run_record_path = (
+        tmp_path
+        / "data"
+        / "runs"
+        / "attempts"
+        / "range"
+        / ("a" * 32)
+        / "run.json"
+    )
     base_client = SimpleNamespace(
         responses=SimpleNamespace(parse=Mock()),
         marker=object(),
@@ -164,12 +242,81 @@ def install_pipeline(
         report_path=report_path,
         run_record_path=run_record_path,
     )
+    attempt = AttemptPaths(
+        date_range=DATE_RANGE,
+        run_id="a" * 32,
+        attempt_dir=run_record_path.parent,
+        raw_path=raw_path,
+        report_path=report_path,
+    )
 
-    monkeypatch.setattr(main_module, "RAW_DATA_DIR", tmp_path / "raw")
-    monkeypatch.setattr(main_module, "REPORTS_DIR", tmp_path / "reports")
-    monkeypatch.setattr(main_module, "RUNS_DIR", tmp_path / "runs")
+    class FakeLock:
+        held = True
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args: object) -> bool:
+            self.held = False
+            return False
+
+    lock = FakeLock()
+    storage = SimpleNamespace(root=tmp_path)
+    storage.acquire_lock = Mock(return_value=lock)
+    storage.read_publication = Mock(return_value=None)
+    storage.allocate_attempt = Mock(return_value=attempt)
+    storage.write_raw = Mock(
+        side_effect=lambda _attempt, value, **_kwargs: StoredArtifact(
+            path=mocks.save_research(value, output_dir=tmp_path / "raw"),
+            sha256="0" * 64,
+            byte_length=0,
+        )
+    )
+    storage.write_report = Mock(
+        side_effect=lambda _attempt, value, **_kwargs: StoredArtifact(
+            path=mocks.save_report(
+                DATE_RANGE,
+                value,
+                output_dir=tmp_path / "reports",
+            ),
+            sha256="0" * 64,
+            byte_length=0,
+        )
+    )
+    storage.publish = Mock(
+        return_value=SimpleNamespace(
+            state="published",
+            durability="confirmed",
+            publication=SimpleNamespace(report_path=report_path),
+        )
+    )
+    storage.attempt_run_record_path = Mock(return_value=run_record_path)
+
+    def write_attempt_record(
+        _attempt: object,
+        content: bytes,
+        **_kwargs: object,
+    ) -> Path:
+        record = RunRecord.model_validate_json(content)
+        return mocks.save_run_record(record, output_dir=tmp_path / "runs")
+
+    storage.write_attempt_run_record = Mock(side_effect=write_attempt_record)
+    mocks.storage = storage
+    mocks.attempt = attempt
+    mocks.lock = lock
+
+    storage_factory = Mock(return_value=storage)
+    mocks.storage_factory = storage_factory
+    monkeypatch.setattr(main_module, "_create_storage", storage_factory)
+    legacy_check = Mock(return_value=LegacyPublicationCheck(state="absent"))
+    monkeypatch.setattr(main_module, "check_legacy_publication", legacy_check)
+    mocks.legacy_check = legacy_check
     monkeypatch.setattr(main_module, "load_config", mocks.load_config)
-    monkeypatch.setattr(main_module, "load_history", mocks.load_history)
+    monkeypatch.setattr(
+        main_module,
+        "load_publication_history",
+        mocks.load_history,
+    )
     monkeypatch.setattr(
         main_module,
         "create_openai_client",
@@ -180,19 +327,8 @@ def install_pipeline(
         "research_all_categories",
         mocks.research,
     )
-    monkeypatch.setattr(
-        main_module,
-        "save_research_run",
-        mocks.save_research,
-    )
     monkeypatch.setattr(main_module, "curate_research_run", mocks.curate)
     monkeypatch.setattr(main_module, "generate_report", mocks.generate)
-    monkeypatch.setattr(main_module, "save_report", mocks.save_report)
-    monkeypatch.setattr(
-        main_module,
-        "save_run_record",
-        mocks.save_run_record,
-    )
     return mocks
 
 
@@ -344,6 +480,7 @@ def test_invalid_date_argument_combinations_fail_cleanly(
     assert result == 2
     assert "Error:" in capsys.readouterr().err
     mocks.research.assert_not_called()
+    mocks.storage_factory.assert_not_called()
 
 
 @pytest.mark.parametrize("invalid_date", ["September-1", "20260901"])
@@ -362,6 +499,7 @@ def test_invalid_date_string_fails_clearly(
     assert result == 2
     assert "expected YYYY-MM-DD" in capsys.readouterr().err
     mocks.research.assert_not_called()
+    mocks.storage_factory.assert_not_called()
 
 
 def test_help_exits_successfully_without_loading_config_or_creating_client(
@@ -379,6 +517,8 @@ def test_help_exits_successfully_without_loading_config_or_creating_client(
     mocks.load_config.assert_not_called()
     mocks.create_client.assert_not_called()
     mocks.research.assert_not_called()
+    mocks.storage_factory.assert_not_called()
+    mocks.storage.acquire_lock.assert_not_called()
 
 
 def test_pipeline_order_data_flow_counts_and_console_output(
@@ -468,9 +608,7 @@ def test_pipeline_order_data_flow_counts_and_console_output(
     )
     mocks.load_history.assert_called_once_with(
         DATE_RANGE,
-        runs_dir=tmp_path / "runs",
-        raw_dir=tmp_path / "raw",
-        reports_dir=tmp_path / "reports",
+        storage=mocks.storage,
     )
     mocks.generate.assert_called_once_with(
         DATE_RANGE,
@@ -483,7 +621,6 @@ def test_pipeline_order_data_flow_counts_and_console_output(
         DATE_RANGE,
         "# Weekly report\n",
         output_dir=tmp_path / "reports",
-        overwrite=False,
     )
 
     output = capsys.readouterr().out
@@ -661,7 +798,7 @@ def test_zero_or_fewer_than_eight_curated_stories_are_allowed(
     mocks.save_report.assert_called_once()
 
 
-def test_overwrite_flag_is_forwarded_to_report_persistence(
+def test_overwrite_flag_is_forwarded_to_manifest_publication(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -675,10 +812,10 @@ def test_overwrite_flag_is_forwarded_to_report_persistence(
     result = main_module.main(["--overwrite"])
 
     assert result == 0
-    assert mocks.save_report.call_args.kwargs["overwrite"] is True
+    assert mocks.storage.publish.call_args.kwargs["overwrite"] is True
 
 
-def test_existing_report_stops_before_configuration_and_research(
+def test_existing_exact_range_publication_stops_before_configuration_and_research(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
@@ -689,19 +826,19 @@ def test_existing_report_stops_before_configuration_and_research(
         "get_default_date_range",
         Mock(return_value=DATE_RANGE),
     )
-    report_path = tmp_path / "reports" / "2026-W37.md"
-    report_path.parent.mkdir()
-    report_path.write_text("existing report\n", encoding="utf-8")
+    mocks.storage.read_publication.return_value = SimpleNamespace(
+        manifest_path=tmp_path / "data/runs/published/range.json"
+    )
 
     result = main_module.main([])
 
     assert result == 1
-    assert "Report already exists" in capsys.readouterr().err
+    assert "publication already exists" in capsys.readouterr().err
     mocks.load_config.assert_not_called()
     mocks.research.assert_not_called()
 
 
-def test_overwrite_bypasses_early_report_check(
+def test_overwrite_bypasses_exact_range_publication_preflight(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -711,15 +848,121 @@ def test_overwrite_bypasses_early_report_check(
         "get_default_date_range",
         Mock(return_value=DATE_RANGE),
     )
-    report_path = tmp_path / "reports" / "2026-W37.md"
-    report_path.parent.mkdir()
-    report_path.write_text("existing report\n", encoding="utf-8")
+    mocks.storage.read_publication.return_value = SimpleNamespace(
+        manifest_path=tmp_path / "data/runs/published/range.json"
+    )
 
     result = main_module.main(["--overwrite"])
 
     assert result == 0
     mocks.research.assert_called_once()
-    assert mocks.save_report.call_args.kwargs["overwrite"] is True
+    assert mocks.storage.publish.call_args.kwargs["overwrite"] is True
+
+
+@pytest.mark.parametrize("overwrite", [False, True])
+def test_invalid_exact_range_publication_fails_closed_before_configuration(
+    overwrite: bool,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    mocks = install_pipeline(monkeypatch, tmp_path)
+    mocks.storage.read_publication.side_effect = InvalidPublicationError(
+        "injected invalid manifest"
+    )
+    arguments = ["--start", "2026-09-01", "--end", "2026-09-07"]
+    if overwrite:
+        arguments.append("--overwrite")
+
+    assert main_module.main(arguments) == 1
+
+    assert "invalid or unreadable" in capsys.readouterr().err
+    mocks.load_config.assert_not_called()
+    mocks.storage.allocate_attempt.assert_not_called()
+    mocks.research.assert_not_called()
+    mocks.legacy_check.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    ("legacy_state", "overwrite", "expected_result"),
+    [
+        ("published", False, 1),
+        ("published", True, 0),
+        ("invalid", False, 1),
+        ("invalid", True, 1),
+    ],
+)
+def test_exact_range_legacy_preflight_is_strict_and_overwrite_aware(
+    legacy_state: str,
+    overwrite: bool,
+    expected_result: int,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    mocks = install_pipeline(monkeypatch, tmp_path)
+    diagnostic = (
+        HistoryDiagnostic(
+            code="legacy_invalid",
+            message="injected ambiguous legacy publication",
+        )
+        if legacy_state == "invalid"
+        else None
+    )
+    mocks.legacy_check.return_value = LegacyPublicationCheck(
+        state=legacy_state,
+        diagnostic=diagnostic,
+    )
+    arguments = ["--start", "2026-09-01", "--end", "2026-09-07"]
+    if overwrite:
+        arguments.append("--overwrite")
+
+    assert main_module.main(arguments) == expected_result
+
+    mocks.legacy_check.assert_called_once_with(DATE_RANGE, storage=mocks.storage)
+    if expected_result:
+        mocks.load_config.assert_not_called()
+        mocks.storage.allocate_attempt.assert_not_called()
+        mocks.research.assert_not_called()
+    else:
+        mocks.research.assert_called_once()
+
+
+@pytest.mark.parametrize(
+    "lock_error",
+    [
+        PublicationLockBusyError("busy"),
+        PublicationLockUnsupportedError("unsupported"),
+    ],
+)
+def test_lock_failure_stops_before_configuration_or_attempt(
+    lock_error: StorageError,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    mocks = install_pipeline(monkeypatch, tmp_path)
+    mocks.storage.acquire_lock.side_effect = lock_error
+
+    assert main_module.main([]) == 1
+
+    assert "Storage operation failed" in capsys.readouterr().err
+    mocks.load_config.assert_not_called()
+    mocks.storage.allocate_attempt.assert_not_called()
+    mocks.research.assert_not_called()
+
+
+def test_configuration_failure_creates_no_attempt_or_telemetry(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    mocks = install_pipeline(monkeypatch, tmp_path)
+    mocks.load_config.return_value = AppConfig()
+
+    assert main_module.main([]) == 1
+
+    mocks.storage.allocate_attempt.assert_not_called()
+    mocks.storage.write_attempt_run_record.assert_not_called()
+    mocks.create_client.assert_not_called()
 
 
 def test_start_after_end_is_rejected_as_cli_usage_error(
@@ -971,9 +1214,11 @@ def test_success_run_record_contains_current_pipeline_state_and_totals(
     assert run_record.curated_item_count == 2
     assert run_record.raw_research_path == mocks.raw_path
     assert run_record.report_path == mocks.report_path
-    assert run_record.run_record_path == (
-        tmp_path / "runs" / "2026-09-01_to_2026-09-07.json"
-    )
+    assert run_record.run_record_path == mocks.run_record_path
+    assert run_record.publication is not None
+    assert run_record.publication.run_id == "a" * 32
+    assert run_record.publication.state == "published"
+    assert run_record.publication.durability_confirmed is True
     output = capsys.readouterr().out
     assert "Verified 2 items: 2 accepted, 0 rejected, 0 warnings." in output
     assert "API calls: 8" in output
@@ -1402,6 +1647,12 @@ def install_responses_pipeline(
     config: AppConfig = CONFIG,
 ) -> SimpleNamespace:
     """Keep real stages/persistence; fake only config and Responses transport."""
+    clock_base = datetime(2026, 9, 20, tzinfo=UTC)
+    monkeypatch.setattr(
+        main_module,
+        "_utc_now",
+        Mock(side_effect=[clock_base, clock_base + timedelta(seconds=1)]),
+    )
     responses: list[object] = []
     for group in run.categories:
         response = api_response()
@@ -1431,17 +1682,16 @@ def install_responses_pipeline(
     verify = Mock(wraps=main_module.verify_research_run)
     curate = Mock(wraps=main_module.curate_research_run)
     generate = Mock(wraps=main_module.generate_report)
-    save_raw = Mock(wraps=main_module.save_research_run)
-    monkeypatch.setattr(main_module, "RAW_DATA_DIR", tmp_path / "raw")
-    monkeypatch.setattr(main_module, "REPORTS_DIR", tmp_path / "reports")
-    monkeypatch.setattr(main_module, "RUNS_DIR", tmp_path / "runs")
+    storage = PublicationStorage(tmp_path)
+    save_raw = Mock(wraps=storage.write_raw)
+    monkeypatch.setattr(storage, "write_raw", save_raw)
+    monkeypatch.setattr(main_module, "_create_storage", Mock(return_value=storage))
     monkeypatch.setattr(main_module, "load_config", Mock(return_value=config))
     monkeypatch.setattr(main_module, "create_openai_client", factory)
     monkeypatch.setattr(main_module, "observe_openai_client", observe)
     monkeypatch.setattr(main_module, "verify_research_run", verify)
     monkeypatch.setattr(main_module, "curate_research_run", curate)
     monkeypatch.setattr(main_module, "generate_report", generate)
-    monkeypatch.setattr(main_module, "save_research_run", save_raw)
     # A stage fallback would violate the shared-client invariant and could make
     # a live request. Fail immediately if any stage attempts it.
     for module in (research_module, curate_module, report_module):
@@ -1451,7 +1701,7 @@ def install_responses_pipeline(
     return SimpleNamespace(
         parse=parse, responses=responses, factory=factory, base_client=base_client,
         observe=observe, verify=verify, curate=curate, generate=generate,
-        save_raw=save_raw,
+        save_raw=save_raw, storage=storage,
     )
 
 
@@ -1460,12 +1710,28 @@ def run_fresh_main() -> int:
 
 
 def saved_record(tmp_path: Path) -> RunRecord:
-    path = tmp_path / "runs" / "2026-09-01_to_2026-09-07.json"
+    paths = saved_record_paths(tmp_path)
+    assert len(paths) == 1
+    path = paths[0]
     return RunRecord.model_validate_json(path.read_text(encoding="utf-8"))
 
 
+def saved_record_paths(tmp_path: Path) -> list[Path]:
+    return sorted(
+        (tmp_path / "data" / "runs" / "attempts").glob(
+            "2026-09-01_to_2026-09-07/*/run.json"
+        )
+    )
+
+
 def saved_raw(tmp_path: Path) -> ResearchRun:
-    path = tmp_path / "raw" / "2026-09-01_to_2026-09-07.json"
+    paths = list(
+        (tmp_path / "data" / "raw").glob(
+            "2026-09-01_to_2026-09-07/*.json"
+        )
+    )
+    assert len(paths) == 1
+    path = paths[0]
     return ResearchRun.model_validate_json(path.read_text(encoding="utf-8"))
 
 
@@ -1524,7 +1790,7 @@ def test_real_fresh_pipeline_requires_provenance_and_preserves_eight_call_budget
     assert calls[7].kwargs["text_format"] is report_module.ReportContent
     record = saved_record(tmp_path)
     assert record.schema_version == 1
-    assert record.application_version == main_module.__version__ == "0.5.0"
+    assert record.application_version == main_module.__version__ == "0.6.0"
     assert record.status == "success" and record.error_stage is None
     assert record.max_retries == 0 and record.timeout_seconds == 12.5
     assert record.researched_category_count == 6
@@ -1541,6 +1807,28 @@ def test_real_fresh_pipeline_requires_provenance_and_preserves_eight_call_budget
     assert record.api_totals.output_tokens == 40
     assert record.api_totals.total_tokens == 120
     assert record.raw_research_path.is_file() and record.report_path.is_file()
+    publication = mocks.storage.read_publication(DATE_RANGE)
+    assert publication is not None
+    assert publication.manifest.run_id == record.publication.run_id
+    assert publication.raw_path == record.raw_research_path
+    assert publication.report_path == record.report_path
+    assert record.run_record_path == (
+        tmp_path
+        / "data"
+        / "runs"
+        / "attempts"
+        / "2026-09-01_to_2026-09-07"
+        / publication.manifest.run_id
+        / "run.json"
+    )
+    assert not list((tmp_path / "data" / "runs").glob("*.json"))
+    assert not list((tmp_path / "reports").glob("*.md"))
+    later_history = main_module.load_publication_history(
+        DateRange(start=date(2026, 9, 8), end=date(2026, 9, 14)),
+        storage=mocks.storage,
+    )
+    assert later_history.runs_loaded == 1
+    assert [story.item.title for story in later_history.stories] == [item.title]
     markdown = record.report_path.read_text(encoding="utf-8")
     for fact in (
         item.title, item.organization, item.published_date.isoformat(), item.summary,
@@ -1828,15 +2116,17 @@ def test_real_strict_pipeline_failures_preserve_partial_paths_counts_and_calls(
     elif failure == "raw_save":
         mocks.save_raw.side_effect = OSError("fake raw disk failure")
     else:
-        monkeypatch.setattr(main_module, "save_report", Mock(
-            side_effect=OSError("fake report disk failure")
-        ))
+        monkeypatch.setattr(
+            mocks.storage,
+            "write_report",
+            Mock(side_effect=OSError("fake report disk failure")),
+        )
 
     assert run_fresh_main() == 1
 
     record = saved_record(tmp_path)
     assert record.status == "failed" and record.error_stage == expected_stage
-    assert record.schema_version == 1 and record.application_version == "0.5.0"
+    assert record.schema_version == 1 and record.application_version == "0.6.0"
     assert record.api_totals.logical_call_count == mocks.parse.call_count == call_count
     assert record.verification_accepted_count == accepted
     assert record.curated_item_count == curated
@@ -1885,12 +2175,12 @@ def test_real_pipeline_run_record_failure_is_best_effort(
         mocks.responses[6] = RuntimeError("fake primary provider failure")
         mocks.parse.side_effect = mocks.responses
     save_record = Mock(side_effect=OSError("fake telemetry disk failure"))
-    monkeypatch.setattr(main_module, "save_run_record", save_record)
+    monkeypatch.setattr(mocks.storage, "write_attempt_run_record", save_record)
 
     assert run_fresh_main() == (1 if primary_failure else 0)
 
     save_record.assert_called_once()
-    record = save_record.call_args.args[0]
+    record = RunRecord.model_validate_json(save_record.call_args.args[1])
     assert record.verification_accepted_count == 1
     assert record.raw_research_path.is_file()
     output = capsys.readouterr()
@@ -1903,6 +2193,77 @@ def test_real_pipeline_run_record_failure_is_best_effort(
     else:
         assert record.status == "success" and record.report_path.is_file()
         assert mocks.parse.call_count == 8
+
+
+@pytest.mark.parametrize(
+    ("state", "durability", "expected_confirmed"),
+    [
+        ("not_published", "not_applicable", None),
+        ("published", "unconfirmed", False),
+        ("unknown", "unconfirmed", None),
+    ],
+)
+def test_commit_failure_uses_storage_classification_in_attempt_telemetry(
+    state: str,
+    durability: str,
+    expected_confirmed: bool | None,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    mocks = install_pipeline(monkeypatch, tmp_path)
+    mocks.storage.publish.side_effect = PublicationCommitError(
+        "injected commit failure",
+        state=state,
+        durability=durability,
+        publication=None,
+    )
+
+    assert main_module.main([]) == 1
+
+    record = mocks.save_run_record.call_args.args[0]
+    assert record.status == "failed" and record.error_stage == "save"
+    assert record.report_path == mocks.report_path
+    assert record.publication.state == state
+    assert record.publication.durability_confirmed is expected_confirmed
+    output = capsys.readouterr().err
+    if state == "published":
+        assert "published" in output and "unconfirmed" in output
+    elif state == "unknown":
+        assert "outcome is unknown" in output
+    else:
+        assert "not published" in output
+
+
+@pytest.mark.parametrize(
+    ("state", "durability", "expected_confirmed"),
+    [
+        ("not_published", "not_applicable", None),
+        ("published", "unconfirmed", False),
+        ("unknown", "unconfirmed", None),
+    ],
+)
+def test_commit_interrupt_preserves_130_and_observed_publication_state(
+    state: str,
+    durability: str,
+    expected_confirmed: bool | None,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    mocks = install_pipeline(monkeypatch, tmp_path)
+    mocks.storage.publish.side_effect = PublicationCommitInterrupted(
+        "injected commit interruption",
+        state=state,
+        durability=durability,
+        publication=None,
+    )
+
+    assert main_module.main([]) == 130
+
+    record = mocks.save_run_record.call_args.args[0]
+    assert record.status == "failed" and record.error_stage == "save"
+    assert record.publication.state == state
+    assert record.publication.durability_confirmed is expected_confirmed
 
 
 @pytest.mark.parametrize(
@@ -1951,8 +2312,8 @@ def test_backwards_run_clock_preserves_primary_outcome_without_false_record(
     finished_at = started_at - timedelta(seconds=1)
     clock = Mock(side_effect=[started_at, finished_at])
     monkeypatch.setattr(main_module, "_utc_now", clock)
-    save_record = Mock(wraps=main_module.save_run_record)
-    monkeypatch.setattr(main_module, "save_run_record", save_record)
+    save_record = Mock(wraps=mocks.storage.write_attempt_run_record)
+    monkeypatch.setattr(mocks.storage, "write_attempt_run_record", save_record)
     if outcome != "success":
         mocks.responses[6] = (
             KeyboardInterrupt() if outcome == "interrupt"
@@ -1970,7 +2331,7 @@ def test_backwards_run_clock_preserves_primary_outcome_without_false_record(
     assert "RunRecord not written" in output.err
     clock.assert_has_calls([call(), call()])
     save_record.assert_not_called()
-    assert not (tmp_path / "runs").exists()
+    assert not list((tmp_path / "data" / "runs" / "attempts").glob("**/run.json"))
     # Standalone schema validation must still reject inverted timestamps.
     with pytest.raises(ValueError, match="started_at must not be after finished_at"):
         RunRecord(
@@ -1980,16 +2341,16 @@ def test_backwards_run_clock_preserves_primary_outcome_without_false_record(
         )
     assert saved_raw(tmp_path) == make_research_run(make_item(1))
     if outcome == "success":
-        assert (tmp_path / "reports" / "2026-W37.md").is_file()
+        assert list((tmp_path / "reports").glob("**/*.md"))
         assert "API calls: 8" in output.out
         assert "Tokens: 120" in output.out
         assert "Run telemetry saved" not in output.out
     elif outcome == "provider_failure":
         assert "OpenAI curation request failed" in output.err
-        assert not (tmp_path / "reports").exists()
+        assert not list((tmp_path / "reports").glob("**/*.md"))
     else:
         assert "Interrupted by user" in output.err
-        assert not (tmp_path / "reports").exists()
+        assert not list((tmp_path / "reports").glob("**/*.md"))
 
 
 # Version 0.5 Phase 3: Main history integration and path-specific telemetry.
@@ -2018,9 +2379,7 @@ def test_main_loads_history_once_and_passes_exact_result_to_curate(
 
     mocks.load_history.assert_called_once_with(
         DATE_RANGE,
-        runs_dir=tmp_path / "runs",
-        raw_dir=tmp_path / "raw",
-        reports_dir=tmp_path / "reports",
+        storage=mocks.storage,
     )
     assert mocks.curate.call_args.kwargs["history"] is history
     run_record = mocks.save_run_record.call_args.args[0]
@@ -2077,7 +2436,9 @@ def test_real_pipeline_applies_history_state_when_no_candidate_matches(
         *(prior,) if state != "unavailable" else (),
         skipped_count=1 if state == "partial" else 0,
     )
-    monkeypatch.setattr(main_module, "load_history", Mock(return_value=history))
+    monkeypatch.setattr(
+        main_module, "load_publication_history", Mock(return_value=history)
+    )
 
     assert run_fresh_main() == 0
 
@@ -2207,7 +2568,7 @@ def test_all_repeat_pipeline_uses_seven_calls_and_truthful_empty_report(
     )
     history = make_history_result("complete", prior)
     loader = Mock(return_value=history)
-    monkeypatch.setattr(main_module, "load_history", loader)
+    monkeypatch.setattr(main_module, "load_publication_history", loader)
 
     assert run_fresh_main() == 0
 
@@ -2260,7 +2621,7 @@ def test_mixed_repeat_and_low_score_nonrepeat_uses_general_empty_message(
     )
     monkeypatch.setattr(
         main_module,
-        "load_history",
+        "load_publication_history",
         Mock(return_value=make_history_result("complete", prior_repeat, prior_new)),
     )
 
@@ -2301,7 +2662,7 @@ def test_genuine_follow_up_survives_pipeline_with_eight_calls(
     )
     monkeypatch.setattr(
         main_module,
-        "load_history",
+        "load_publication_history",
         Mock(return_value=make_history_result("complete", prior)),
     )
 
@@ -2374,7 +2735,7 @@ def test_invalid_curate_output_records_no_successful_classification_totals(
     )
     monkeypatch.setattr(
         main_module,
-        "load_history",
+        "load_publication_history",
         Mock(return_value=make_history_result("complete", prior)),
     )
 
@@ -2417,7 +2778,7 @@ def test_report_failure_retains_validated_history_statistics(
     )
     monkeypatch.setattr(
         main_module,
-        "load_history",
+        "load_publication_history",
         Mock(return_value=make_history_result("complete", prior)),
     )
 
@@ -2430,3 +2791,409 @@ def test_report_failure_retains_validated_history_statistics(
     assert record.history.repeats_suppressed == 0
     assert record.history.selected_follow_up_count == 1
     assert record.report_path is None
+
+
+def test_real_overwrite_advances_manifest_and_preserves_first_attempt(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    first_item = make_item(1)
+    first = install_responses_pipeline(
+        monkeypatch, tmp_path, make_research_run(first_item)
+    )
+    assert run_fresh_main() == 0
+    first_publication = first.storage.read_publication(DATE_RANGE)
+    assert first_publication is not None
+    first_raw = first_publication.raw_bytes
+    first_report = first_publication.report_bytes
+
+    second_item = make_item(2)
+    second = install_responses_pipeline(
+        monkeypatch, tmp_path, make_research_run(second_item)
+    )
+    assert main_module.main([
+        "--start", "2026-09-01", "--end", "2026-09-07", "--overwrite",
+    ]) == 0
+
+    current = second.storage.read_publication(DATE_RANGE)
+    assert current is not None
+    assert current.manifest.run_id != first_publication.manifest.run_id
+    assert current.raw_path != first_publication.raw_path
+    assert current.report_path != first_publication.report_path
+    assert first_publication.raw_path.read_bytes() == first_raw
+    assert first_publication.report_path.read_bytes() == first_report
+    assert ResearchRun.model_validate_json(current.raw_bytes) == make_research_run(
+        second_item
+    )
+    records = [
+        RunRecord.model_validate_json(path.read_text(encoding="utf-8"))
+        for path in saved_record_paths(tmp_path)
+    ]
+    assert len(records) == 2
+    assert {record.publication.run_id for record in records} == {
+        first_publication.manifest.run_id,
+        current.manifest.run_id,
+    }
+    assert all(record.status == "success" for record in records)
+
+
+def test_real_empty_overwrite_does_not_resurrect_previous_stories(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    first = install_responses_pipeline(
+        monkeypatch, tmp_path, make_research_run(make_item(1))
+    )
+    assert run_fresh_main() == 0
+    first_publication = first.storage.read_publication(DATE_RANGE)
+    assert first_publication is not None
+
+    second = install_responses_pipeline(monkeypatch, tmp_path, make_research_run())
+    assert main_module.main([
+        "--start", "2026-09-01", "--end", "2026-09-07", "--overwrite",
+    ]) == 0
+
+    current = second.storage.read_publication(DATE_RANGE)
+    assert current is not None
+    assert current.manifest.run_id != first_publication.manifest.run_id
+    assert "No candidates were available for curation" in (
+        current.report_bytes.decode("utf-8")
+    )
+    history = main_module.load_publication_history(
+        DateRange(start=date(2026, 9, 8), end=date(2026, 9, 14)),
+        storage=second.storage,
+    )
+    assert history.state == "unavailable"
+    assert history.stories == ()
+    assert first_publication.report_path.is_file()
+
+
+def test_real_empty_manifest_blocks_repeat_before_configuration_or_attempt(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    first = install_responses_pipeline(monkeypatch, tmp_path, make_research_run())
+    assert run_fresh_main() == 0
+    attempts_before = set(
+        (tmp_path / "data" / "runs" / "attempts").glob("**/run.json")
+    )
+
+    second = install_responses_pipeline(
+        monkeypatch, tmp_path, make_research_run(make_item(1))
+    )
+    assert run_fresh_main() == 1
+
+    second.factory.assert_not_called()
+    second.parse.assert_not_called()
+    assert set(
+        (tmp_path / "data" / "runs" / "attempts").glob("**/run.json")
+    ) == attempts_before
+
+
+def test_real_exact_empty_legacy_blocks_without_overwrite(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    persist_empty_legacy_publication(tmp_path, DATE_RANGE)
+    mocks = install_responses_pipeline(
+        monkeypatch, tmp_path, make_research_run(make_item(1))
+    )
+
+    assert run_fresh_main() == 1
+
+    mocks.factory.assert_not_called()
+    mocks.parse.assert_not_called()
+    assert not list((tmp_path / "data" / "runs" / "attempts").glob("**/*"))
+
+
+def test_real_same_iso_week_other_legacy_range_does_not_block(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    other_range = DateRange(start=date(2026, 9, 2), end=date(2026, 9, 7))
+    _, legacy_report, legacy_record = persist_empty_legacy_publication(
+        tmp_path, other_range
+    )
+    legacy_report_bytes = legacy_report.read_bytes()
+    legacy_record_bytes = legacy_record.read_bytes()
+    mocks = install_responses_pipeline(
+        monkeypatch, tmp_path, make_research_run(make_item(1))
+    )
+
+    assert run_fresh_main() == 0
+
+    publication = mocks.storage.read_publication(DATE_RANGE)
+    assert publication is not None
+    assert publication.manifest.date_range.to_date_range() == DATE_RANGE
+    assert legacy_report.read_bytes() == legacy_report_bytes
+    assert legacy_record.read_bytes() == legacy_record_bytes
+
+
+def test_real_overwrite_transitions_legacy_to_manifest_without_mutation(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    legacy_raw, legacy_report, legacy_record = persist_empty_legacy_publication(
+        tmp_path, DATE_RANGE
+    )
+    legacy_bytes = {
+        path: path.read_bytes()
+        for path in (legacy_raw, legacy_report, legacy_record)
+    }
+    current_item = make_item(1)
+    mocks = install_responses_pipeline(
+        monkeypatch, tmp_path, make_research_run(current_item)
+    )
+
+    assert main_module.main([
+        "--start", "2026-09-01", "--end", "2026-09-07", "--overwrite",
+    ]) == 0
+
+    publication = mocks.storage.read_publication(DATE_RANGE)
+    assert publication is not None
+    assert all(path.read_bytes() == content for path, content in legacy_bytes.items())
+    history = main_module.load_publication_history(
+        DateRange(start=date(2026, 9, 8), end=date(2026, 9, 14)),
+        storage=mocks.storage,
+    )
+    assert history.runs_loaded == 1
+    assert [story.item.title for story in history.stories] == [current_item.title]
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        "research",
+        "raw_save",
+        "verify",
+        "history",
+        "curate",
+        "report",
+        "report_save",
+        "commit_before",
+    ],
+)
+def test_real_failed_overwrite_preserves_previous_publication(
+    failure: str,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    first = install_responses_pipeline(
+        monkeypatch, tmp_path, make_research_run(make_item(1))
+    )
+    assert run_fresh_main() == 0
+    previous = first.storage.read_publication(DATE_RANGE)
+    assert previous is not None
+
+    second = install_responses_pipeline(
+        monkeypatch, tmp_path, make_research_run(make_item(2))
+    )
+    if failure == "research":
+        second.responses[0] = RuntimeError("injected research failure")
+        second.parse.side_effect = second.responses
+    elif failure == "raw_save":
+        second.save_raw.side_effect = StorageError("injected raw save failure")
+    elif failure == "verify":
+        second.verify.side_effect = VerificationError("injected verify failure")
+    elif failure == "history":
+        monkeypatch.setattr(
+            main_module,
+            "load_publication_history",
+            Mock(side_effect=StorageError("injected history failure")),
+        )
+    elif failure == "curate":
+        second.responses[6] = RuntimeError("injected curate failure")
+        second.parse.side_effect = second.responses
+    elif failure == "report":
+        second.responses[7] = RuntimeError("injected report failure")
+        second.parse.side_effect = second.responses
+    elif failure == "report_save":
+        monkeypatch.setattr(
+            second.storage,
+            "write_report",
+            Mock(side_effect=StorageError("injected report save failure")),
+        )
+    else:
+        monkeypatch.setattr(
+            second.storage,
+            "publish",
+            Mock(side_effect=PublicationCommitError(
+                "injected pre-commit failure",
+                state="not_published",
+                durability="not_applicable",
+                publication=previous,
+            )),
+        )
+
+    assert main_module.main([
+        "--start", "2026-09-01", "--end", "2026-09-07", "--overwrite",
+    ]) == 1
+
+    visible = PublicationStorage(tmp_path).read_publication(DATE_RANGE)
+    assert visible is not None
+    assert visible.manifest.run_id == previous.manifest.run_id
+    assert visible.manifest_bytes == previous.manifest_bytes
+    records = [
+        RunRecord.model_validate_json(path.read_text(encoding="utf-8"))
+        for path in saved_record_paths(tmp_path)
+    ]
+    assert len(records) == 2
+    failed = next(
+        record
+        for record in records
+        if record.publication.run_id != previous.manifest.run_id
+    )
+    assert failed.status == "failed"
+    assert failed.publication.state == "not_published"
+    assert failed.publication.durability_confirmed is None
+    assert failed.publication.run_id != visible.manifest.run_id
+    if failure == "commit_before":
+        assert failed.report_path is not None and failed.report_path.is_file()
+    else:
+        assert second.storage.read_publication(DATE_RANGE).manifest.run_id == (
+            previous.manifest.run_id
+        )
+
+
+def test_real_interrupted_overwrite_preserves_previous_publication(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    first = install_responses_pipeline(
+        monkeypatch, tmp_path, make_research_run(make_item(1))
+    )
+    assert run_fresh_main() == 0
+    previous = first.storage.read_publication(DATE_RANGE)
+    assert previous is not None
+
+    second = install_responses_pipeline(
+        monkeypatch, tmp_path, make_research_run(make_item(2))
+    )
+    second.responses[6] = KeyboardInterrupt()
+    second.parse.side_effect = second.responses
+
+    assert main_module.main([
+        "--start", "2026-09-01", "--end", "2026-09-07", "--overwrite",
+    ]) == 130
+
+    visible = PublicationStorage(tmp_path).read_publication(DATE_RANGE)
+    assert visible is not None
+    assert visible.manifest.run_id == previous.manifest.run_id
+    records = [
+        RunRecord.model_validate_json(path.read_text(encoding="utf-8"))
+        for path in saved_record_paths(tmp_path)
+    ]
+    assert len(records) == 2
+    interrupted = next(
+        record
+        for record in records
+        if record.publication.run_id != previous.manifest.run_id
+    )
+    assert interrupted.status == "failed"
+    assert interrupted.error_stage == "curate"
+    assert interrupted.publication.state == "not_published"
+
+
+@pytest.mark.parametrize(
+    ("fault", "expected_state", "expected_confirmed"),
+    [
+        ("before_replace", "not_published", None),
+        ("after_replace", "published", False),
+        ("directory_sync", "published", False),
+        ("unknown", "unknown", None),
+    ],
+)
+def test_real_commit_fault_is_classified_and_recorded_by_main(
+    fault: str,
+    expected_state: str,
+    expected_confirmed: bool | None,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    mocks = install_responses_pipeline(
+        monkeypatch, tmp_path, make_research_run(make_item(1))
+    )
+    original_replace = storage_module.os.replace
+    original_fsync_directory = storage_module._fsync_directory
+
+    if fault == "before_replace":
+        def replace(source: Path, target: Path) -> None:
+            raise OSError("injected before replacement")
+
+        monkeypatch.setattr(storage_module.os, "replace", replace)
+    elif fault == "after_replace":
+        def replace(source: Path, target: Path) -> None:
+            original_replace(source, target)
+            raise OSError("injected after replacement")
+
+        monkeypatch.setattr(storage_module.os, "replace", replace)
+    elif fault == "directory_sync":
+        def fsync_directory(path: Path) -> None:
+            if path.name == "published":
+                raise OSError("injected publication directory sync failure")
+            original_fsync_directory(path)
+
+        monkeypatch.setattr(storage_module, "_fsync_directory", fsync_directory)
+    else:
+        def replace(source: Path, target: Path) -> None:
+            target.write_text("indeterminate", encoding="utf-8")
+            source.unlink()
+            raise OSError("injected ambiguous replacement")
+
+        monkeypatch.setattr(storage_module.os, "replace", replace)
+
+    assert run_fresh_main() == 1
+
+    record = saved_record(tmp_path)
+    assert record.status == "failed" and record.error_stage == "save"
+    assert record.publication.state == expected_state
+    assert record.publication.durability_confirmed is expected_confirmed
+    if expected_state == "published":
+        visible = mocks.storage.read_publication(DATE_RANGE)
+        assert visible is not None
+        assert visible.manifest.run_id == record.publication.run_id
+    elif expected_state == "not_published":
+        assert mocks.storage.read_publication(DATE_RANGE) is None
+    else:
+        with pytest.raises(InvalidPublicationError):
+            mocks.storage.read_publication(DATE_RANGE)
+
+
+@pytest.mark.parametrize(
+    ("after_replace", "expected_state", "expected_confirmed"),
+    [
+        (False, "not_published", None),
+        (True, "published", False),
+    ],
+)
+def test_real_commit_keyboard_interrupt_preserves_130_and_commit_observation(
+    after_replace: bool,
+    expected_state: str,
+    expected_confirmed: bool | None,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    mocks = install_responses_pipeline(
+        monkeypatch, tmp_path, make_research_run(make_item(1))
+    )
+    original_replace = storage_module.os.replace
+
+    def interrupting_replace(source: Path, target: Path) -> None:
+        if after_replace:
+            original_replace(source, target)
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(storage_module.os, "replace", interrupting_replace)
+
+    assert run_fresh_main() == 130
+
+    record = saved_record(tmp_path)
+    assert record.status == "failed" and record.error_stage == "save"
+    assert record.publication.state == expected_state
+    assert record.publication.durability_confirmed is expected_confirmed
+    visible = mocks.storage.read_publication(DATE_RANGE)
+    if after_replace:
+        assert visible is not None
+        assert visible.manifest.run_id == record.publication.run_id
+    else:
+        assert visible is None

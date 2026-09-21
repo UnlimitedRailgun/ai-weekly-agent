@@ -7,5 +7,10 @@ __pycache__/
 build/
 dist/
 data/raw/*.json
+data/raw/*/
 data/runs/*.json
+data/runs/attempts/
+data/runs/published/
+data/runs/locks/
 reports/*.md
+reports/*/

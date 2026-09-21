@@ -2,14 +2,18 @@
 
 ## Product Goal and Audience
 
-This repository's released baseline is Version 0.4.0 of an AI & Computer
-Engineering Weekly Research Agent. The current worktree is locally prepared as
-Version 0.5.0 with historical awareness but has not been published. Its target
-reader is a university Computer Engineering student who is relatively new to
-the AI industry. The agent must produce a reliable, approachable weekly overview
-without assuming deep industry knowledge, while retaining enough technical
-detail to be useful. Keep the architecture small, synchronous, explicit, and
-easy for a student to understand and debug.
+This repository's released baseline remains Version 0.5.0 of an AI & Computer
+Engineering Weekly Research Agent. The working tree is locally versioned
+0.6.0 for release preparation but has not been committed, tagged, pushed, or
+released. Version 0.6 focuses on reliable weekly runs and history integrity.
+Phase 2C connects the offline-tested immutable persistence core,
+manifest-backed history reader, exact-range lock, and per-attempt telemetry to
+the normal CLI. The candidate has completed one controlled live validation. Its
+target reader is a university Computer Engineering student who is relatively
+new to the AI industry. The agent must produce a reliable, approachable weekly
+overview without assuming deep industry knowledge, while retaining enough
+technical detail to be useful. Keep the architecture small, synchronous,
+explicit, and easy for a student to understand and debug.
 
 Each run should research important developments published or announced during the previous seven days in these areas:
 
@@ -26,18 +30,18 @@ Prioritize significance over volume. The report is a curated overview, not an ex
 
 Keep the implementation intentionally simple and use one linear pipeline:
 
-`Research x6 -> save original raw ResearchRun -> Verify -> load local history -> Curate -> Grounded Report -> local consistency validation -> deterministic Markdown -> save report -> RunRecord`
+`lock exact range -> preflight -> Research x6 -> save immutable original raw ResearchRun -> Verify -> load publication history -> Curate -> Grounded Report -> local consistency validation -> save immutable Markdown -> publish manifest -> save attempt RunRecord`
 
 The stages have distinct responsibilities:
 
 1. **Research:** Find candidate developments from the defined seven-day window with `web_search` through the OpenAI Responses API. Capture source URLs, evidence-role classifications, and enough source metadata to verify every candidate.
 2. **Raw audit checkpoint:** Persist the original validated `ResearchRun` under `data/raw/` before filtering. Never replace this artifact with verifier output; it must retain items that Verify later rejects.
 3. **Verify:** Apply deterministic, local evidence and structure checks without an API or network call. Produce a separate accepted `ResearchRun`; do not mutate the original. Only accepted items proceed to Curator.
-4. **Historical load:** Reconstruct previously published stories read-only from successful local RunRecords plus their canonical raw and report artifacts. Treat degraded history conservatively; never restore an item rejected by current Verify.
+4. **Historical load:** Reconstruct previously published stories read-only from authenticated publication manifests, with strict legacy successful-RunRecord compatibility. Treat degraded history conservatively; never restore an item rejected by current Verify.
 5. **Curate:** After existing hard filters and exact current-run deduplication, retrieve at most three historical candidates per current item, assess continuity inside the existing single Curate call when needed, remove `REPEAT`, and select accepted developments based on relevance, technical importance, source quality, and usefulness to the target reader.
 6. **Grounded Report:** In one non-search Responses API call for a non-empty selection, generate only interpretation and beginner guidance: `story_id`, `what_it_is`, `why_it_matters`, `student_takeaway`, and optional general concept explanations. Empty selections retain the deterministic zero-call report path.
 7. **Consistency and rendering:** Validate story and concept IDs locally, reject model-generated URLs, and render authoritative upstream facts, sources, and validated historical context into deterministic Markdown. Do not delegate factual or historical fields back to the Report model.
-8. **Save locally:** Completed weekly reports belong under `reports/`. Operational RunRecords belong under `data/runs/` and summarize stage counts, logical API-call telemetry, reliability settings, outcomes, artifact paths, and content-free history counts without storing model content or secrets.
+8. **Save locally:** Attempt raw/report files are immutable. A canonical exact-range manifest is the publication authority. Per-attempt RunRecords summarize stage counts, logical API-call telemetry, reliability settings, publication outcome, artifact paths, and content-free history counts without storing model content or secrets.
 
 Main must create exactly one configured base OpenAI client per normal run, then
 inject category-aware observed views into the six sequential Research calls and
@@ -53,7 +57,22 @@ carry their canonical `research_category`; Curate and Report records must keep
 that field null. Token totals are complete only when every observed call
 supplies all required usage values; never substitute zero for missing usage.
 
-RunRecord persistence is best-effort observability. Attempt a success record after the report is saved and a truthful partial record after an in-scope pipeline failure. A RunRecord save error must not invalidate a successful report or replace the primary pipeline error. Use `data/runs/<start>_to_<end>.json`; atomic replacement for the same date range is allowed independently of report `--overwrite` behavior.
+The normal CLI creates one `PublicationStorage` rooted at the current working
+directory and holds one non-blocking Linux/WSL exact-range lock from preflight
+through best-effort telemetry completion. Save immutable artifacts under
+`data/raw/<range>/<run_id>.json` and `reports/<range>/<run_id>.md`, publish
+`data/runs/published/<range>.json` last, and save attempt telemetry once at
+`data/runs/attempts/<range>/<run_id>/run.json`. `--overwrite` may advance only
+the exact range's manifest; it never mutates the prior artifact set. Legacy
+top-level raw/report/RunRecord files are read-only compatibility data and are
+never migrated automatically.
+
+RunRecord persistence is best-effort observability, not publication authority.
+Attempt one final success record after manifest publication or one truthful
+partial record after an in-scope pipeline failure. A RunRecord save error must
+not invalidate a successful publication or replace the primary pipeline error.
+Schema version 1 has an optional strict `publication` summary for the current
+attempt; older records without it remain readable.
 
 Do not add a database, vector database, RAG system, web UI, Docker setup, email delivery, scheduled jobs, multi-agent framework, Slack/Discord integration, additional verification fetching, semantic page fact-checking, cost estimation, retry-attempt transport instrumentation, async pipeline, dashboard, or historical analytics in the current scope. Do not introduce abstractions intended only for these out-of-scope features.
 
@@ -122,7 +141,8 @@ supported and ambiguous duplicates still reach the single semantic assessment.
 Verify acceptance counts describe pre-dedup accepted items, not prepared Curator
 counts. Keep RunRecord schema 1 and existing truthful empty/failure telemetry.
 These model-reported classifications and identity proxies are not independent
-semantic verification. Package/application version is 0.4.0; RunRecord schema
+semantic verification. The v0.4 release used package/application version
+0.4.0; the released package/application version is now 0.5.0. RunRecord schema
 remains 1. One approved
 Phase 5 live run completed with eight logical calls, eleven strict acceptances,
 and ten final stories. No duplicate group occurred live; exact and semantic
@@ -130,7 +150,7 @@ duplicate resolution remain offline-tested, not live-proven by that sample.
 Keep unknown-date, mutable-page, and single-source limitations explicit; no
 additional live run or independent external fact-checking is implied.
 
-### Version 0.5 Historical Awareness (Local Release Preparation; Not Published)
+### Version 0.5 Historical Awareness (Released)
 
 Historical coverage requires a successful schema-v1 RunRecord, its canonical
 raw `ResearchRun`, and its canonical Markdown report. Reconstruct only stories
@@ -193,6 +213,22 @@ Older schema-v1 records without history must remain readable. The released v0.4
 Pydantic reader's default extra-field behavior accepts the additive field, but
 do not generalize that result to untested external consumers.
 
+The v0.6 Phase 2B/2C development path adds the explicit
+`load_publication_history(..., storage=...)` reader while preserving the old
+standalone `load_history()` contract. The normal CLI now calls the new reader
+exactly once with its single storage object. It discovers canonical publication
+manifests and top-level legacy RunRecords under the one supplied trusted root,
+chooses authority by exact range before loading, and never scans attempts.
+Manifest presence masks same-range legacy data even when the manifest is
+invalid, empty, or only partially reconcilable; only absence permits strict
+legacy fallback. Unsafe or unreadable manifest discovery fails closed. Parse
+only the authenticated raw/report bytes returned by `PublicationStorage`, then
+reuse the existing strict parser and story reconciliation. Keep valid-empty and
+bad ranges from consuming the usable-run cap, sort by report range rather than
+publication time. Exact-range CLI preflight treats a valid empty publication as
+published, fails closed on an invalid current manifest or ambiguous current
+legacy authority, and does no configuration/client work before that decision.
+
 History is not current evidence verification or independent fact-checking.
 Offline mocked classifications validate contracts, not live-model semantic
 accuracy. Controlled Curate-only validation found that one ambiguous synthetic
@@ -203,12 +239,21 @@ valid, and the local validator does not prove semantic truth. At its observed
 score of 1.00, changing only the status would not have selected it; false
 suppression of useful items on other inputs remains possible and unmeasured,
 and low scores are not a general mitigation. The user accepted this documented
-risk specifically as a known limitation for v0.5.0 release preparation; the
-semantic issue remains unresolved. The live evaluations selected no items, so
-selected historical-context rendering and a full v0.5 weekly pipeline remain
-untested live. Publication is not authorized. Do not claim the issue is fixed or
-that its semantic evaluation passed, and do not start additional live validation
-without separate authorization.
+risk specifically as a known limitation for the v0.5.0 release; the semantic
+issue remains unresolved. The live evaluations selected no items, so selected
+historical-context rendering and a full v0.5 weekly pipeline remain untested
+live. Version 0.5.0 is released; that fact does not authorize another live run
+or any later release. Do not claim the issue is fixed or that its semantic
+evaluation passed, and do not start additional live validation without separate
+authorization.
+
+For local v0.6.0 release preparation, the user separately accepted the
+documented residual risks, including the unresolved false-`REPEAT` issue, the
+matched-history live-coverage gaps, the single-source/vendor-claim risks, the
+incomplete per-tool-call evidence, the unresolved timing difference, and the
+Linux/WSL persistence boundaries. Acceptance does not mean these limitations
+were fixed and does not authorize staging, commit, tag, push, another live run,
+or publication.
 
 ## Technology Requirements
 
@@ -227,7 +272,11 @@ Do not substitute the Chat Completions API or an unrelated scraping/search stack
 
 Add production modules under `src/ai_weekly_agent/` and mirror that layout under `tests/` (for example, `src/ai_weekly_agent/research.py` and `tests/test_research.py`). Keep research, deterministic verification, curation, report explanation, Markdown rendering, telemetry, and local persistence as separate concerns, without turning them into a framework. Put reusable prompts in `prompts/` and one-off maintenance utilities in `scripts/`.
 
-Raw research is written under `data/raw/`, final reports under `reports/`, and RunRecords under `data/runs/`. Code must not assume these directories already exist; the saving stage should create them when needed. Use predictable, date-based filenames and avoid overwriting an existing report silently.
+Raw research is written under `data/raw/<range>/`, final reports under
+`reports/<range>/`, attempt RunRecords under `data/runs/attempts/<range>/`, and
+publication manifests under `data/runs/published/`. Code must not assume these
+directories already exist. Keep immutable run-ID artifacts and exact-range
+manifest identity; do not silently overwrite an existing publication.
 
 The `.agents/` and `.codex/` directories are reserved for agent configuration. Treat `.venv/`, caches, generated research/report output, and local credentials as local-only unless the repository explicitly adopts sanitized fixtures or sample reports. Do not commit generated environments or secrets.
 
